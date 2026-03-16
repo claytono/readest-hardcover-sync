@@ -145,6 +145,68 @@ func TestAuth_TokenRefresh(t *testing.T) {
 	assert.Contains(t, requestPaths[1], "grant_type=refresh_token")
 }
 
+// TestAuth_PostToken_NetworkError verifies that postToken (via login) propagates
+// an error when the HTTP request itself fails (server closed before call).
+func TestAuth_PostToken_NetworkError(t *testing.T) {
+	srv := newAuthServer(t, func(w http.ResponseWriter, r *http.Request) {})
+	// Close the server immediately so all requests fail at the transport level.
+	srv.Close()
+
+	auth, err := readest.NewAuth("user@example.com", "secret")
+	require.NoError(t, err)
+	auth.SetAuthURL(srv.URL)
+
+	_, err = auth.Token()
+	require.Error(t, err)
+}
+
+// TestAuth_PostToken_InvalidJSON verifies that postToken returns an error when
+// the server responds with 200 but a non-JSON body.
+func TestAuth_PostToken_InvalidJSON(t *testing.T) {
+	srv := newAuthServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json at all"))
+	})
+
+	auth, err := readest.NewAuth("user@example.com", "secret")
+	require.NoError(t, err)
+	auth.SetAuthURL(srv.URL)
+
+	_, err = auth.Token()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decoding token response")
+}
+
+// TestAuth_StoreTokens_ZeroExpiresAt verifies that when the server omits
+// expires_at (zero value), storeTokens falls back to computing expiry from
+// expires_in so that the token is still considered valid.
+func TestAuth_StoreTokens_ZeroExpiresAt(t *testing.T) {
+	srv := newAuthServer(t, func(w http.ResponseWriter, r *http.Request) {
+		// Omit expires_at (zero) — only provide expires_in.
+		resp := authResponse{
+			AccessToken:  "zero-expiry-token",
+			RefreshToken: "refresh-token",
+			ExpiresIn:    3600,
+			ExpiresAt:    0,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+
+	auth, err := readest.NewAuth("user@example.com", "secret")
+	require.NoError(t, err)
+	auth.SetAuthURL(srv.URL)
+
+	token, err := auth.Token()
+	require.NoError(t, err)
+	assert.Equal(t, "zero-expiry-token", token)
+
+	// A second call should return the cached token without hitting the server again.
+	token2, err := auth.Token()
+	require.NoError(t, err)
+	assert.Equal(t, "zero-expiry-token", token2)
+}
+
 // TestAuth_RefreshFailsRelogin verifies that when a refresh returns 401,
 // Token() falls back to a full login.
 func TestAuth_RefreshFailsRelogin(t *testing.T) {

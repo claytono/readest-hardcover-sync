@@ -48,3 +48,17 @@ func TestDeriveStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestDeriveStatus_CurrentPositiveNoStatus: current > 0 with no explicit reading
+// status — should be treated as "currently reading" (2).
+func TestDeriveStatus_CurrentPositiveNoStatus(t *testing.T) {
+	got := DeriveStatus(50, 400, "")
+	assert.Equal(t, 2, got, "positive current with no status should return 2 (Currently Reading)")
+}
+
+// TestDeriveStatus_FinishedStatusWithLowProgress: "finished" status even when
+// current < total — should still return 3 (finished).
+func TestDeriveStatus_FinishedStatusWithLowProgress(t *testing.T) {
+	got := DeriveStatus(100, 400, "finished")
+	assert.Equal(t, 3, got, "finished status overrides progress position")
+}

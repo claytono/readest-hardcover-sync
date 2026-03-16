@@ -1,6 +1,9 @@
 profile: coverage.out
+
 threshold:
-  total: 80
-  file: 70
+  total: 95
+  file: 90
+
 exclude:
-  paths: []
+  paths:
+    - ^cmd/

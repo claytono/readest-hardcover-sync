@@ -146,3 +146,14 @@ func TestDryRun_UpdateUserBookRead_FakeResponse(t *testing.T) {
 	require.NotNil(t, got.ProgressPages)
 	assert.Equal(t, progressPages, *got.ProgressPages)
 }
+
+// TestDryRun_GetStatuses_PassThrough: GetStatuses delegates to the real implementation.
+func TestDryRun_GetStatuses_PassThrough(t *testing.T) {
+	dru, _ := newDryRunWithMock()
+
+	got, err := dru.GetStatuses(context.Background())
+	require.NoError(t, err)
+	require.NotEmpty(t, got, "GetStatuses should return statuses from the real implementation")
+	// The mock returns 3 statuses.
+	assert.Len(t, got, 3)
+}

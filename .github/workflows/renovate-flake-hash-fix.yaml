@@ -1,0 +1,72 @@
+---
+name: Fix Flake Hashes in Renovate PRs
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+permissions:
+  contents: read
+
+jobs:
+  fix-flake-hashes:
+    name: Fix Flake Hashes
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.user.login == 'renovate[bot]'
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.ref }}
+
+      - name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@89ab342bd48ff7318caf8d39d6a330c7b1df8f2f # v3.15.2
+
+      - name: Setup Cachix
+        uses: cachix/cachix-action@v16
+        with:
+          name: claytono
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: Build to detect hash mismatches
+        run: |
+          nix build --no-link 2>&1 || true
+          nix build .#devShells.x86_64-linux.default --no-link 2>&1 || true
+
+      - name: Fix detected hash mismatches
+        run: determinate-nixd fix hashes --auto-apply
+
+      - name: Check for changes
+        id: check-changes
+        run: |
+          if ! git diff --quiet; then
+            echo "changes=true" >> "$GITHUB_OUTPUT"
+            echo "Flake hash fixes detected:"
+            git diff --stat
+          else
+            echo "changes=false" >> "$GITHUB_OUTPUT"
+            echo "No hash fixes needed"
+          fi
+
+      - name: Commit and push fixes
+        if: steps.check-changes.outputs.changes == 'true'
+        env:
+          BRANCH_NAME: ${{ github.event.pull_request.head.ref }}
+        run: |-
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add flake.nix
+          git commit -m "Update flake hashes"
+          echo "Pushing fixes to branch: $BRANCH_NAME"
+          git push "https://x-access-token:${{ secrets.PAT }}@github.com/${{ github.repository }}" "HEAD:$BRANCH_NAME"

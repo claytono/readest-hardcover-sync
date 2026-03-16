@@ -1,0 +1,57 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigestsToSemver"],
+  "rebaseWhen": "behind-base-branch",
+  "schedule": ["after 2am and before 8am on monday"],
+  "timezone": "America/New_York",
+  "minimumReleaseAge": "14 days",
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^flake\\.nix$/"],
+      "matchStrings": ["go_(?<major>\\d+)_(?<minor>\\d+)"],
+      "currentValueTemplate": "{{{major}}}.{{{minor}}}",
+      "depNameTemplate": "golang",
+      "datasourceTemplate": "golang-version",
+      "versioningTemplate": "go-mod-directive",
+      "autoReplaceStringTemplate": "go_{{{newMajor}}}_{{{newMinor}}}"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^flake\\.nix$/"],
+      "matchStrings": [
+        "pname\\s*=\\s*\"go-test-coverage\";[\\s\\S]*?version\\s*=\\s*\"(?<currentValue>[^\"]+)\";"
+      ],
+      "depNameTemplate": "vladopajic/go-test-coverage",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "gitIgnoredAuthors": ["github-actions[bot]@users.noreply.github.com"],
+  "packageRules": [
+    {
+      "description": "Automerge pre-commit hook updates",
+      "matchManagers": ["pre-commit"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge Go patch and digest updates",
+      "matchDatasources": ["go"],
+      "matchUpdateTypes": ["patch", "digest"],
+      "automerge": true
+    },
+    {
+      "description": "Automerge Docker digest updates",
+      "matchDatasources": ["docker"],
+      "matchUpdateTypes": ["digest"],
+      "automerge": true
+    },
+    {
+      "description": "Bump Go version in flake.nix on new minor releases",
+      "matchDatasources": ["golang-version"],
+      "matchDepNames": ["golang"],
+      "rangeStrategy": "bump"
+    }
+  ]
+}
