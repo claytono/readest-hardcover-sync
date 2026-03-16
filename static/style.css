@@ -1,0 +1,451 @@
+/* Readest–Hardcover Sync – minimal classless CSS */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+:root {
+  --color-bg: #f9f9fb;
+  --color-surface: #ffffff;
+  --color-border: #d1d5db;
+  --color-text: #111827;
+  --color-muted: #6b7280;
+  --color-primary: #4f46e5;
+  --color-primary-hover: #4338ca;
+  --color-danger: #dc2626;
+  --color-danger-hover: #b91c1c;
+  --color-success-bg: #ecfdf5;
+  --color-success-text: #065f46;
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --radius: 6px;
+}
+
+html {
+  font-family: var(--font-sans);
+  font-size: 16px;
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+body {
+  margin: 0;
+  padding: 0;
+}
+
+header {
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+  padding: 0.75rem 1.5rem;
+}
+
+header h1 {
+  margin: 0.25rem 0 0;
+  font-size: 1.25rem;
+}
+
+nav {
+  font-size: 0.875rem;
+}
+
+nav a {
+  color: var(--color-primary);
+  text-decoration: none;
+  margin-right: 0.75rem;
+}
+
+nav a:hover {
+  text-decoration: underline;
+}
+
+main {
+  max-width: 1200px;
+  margin: 2rem auto;
+  padding: 0 1.5rem;
+}
+
+h2 {
+  margin-top: 0;
+  font-size: 1.5rem;
+}
+
+h3 {
+  font-size: 1.125rem;
+  margin-top: 1.5rem;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  font-size: 0.9rem;
+}
+
+thead tr {
+  background: var(--color-bg);
+}
+
+th, td {
+  padding: 0.6rem 0.875rem;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+}
+
+th {
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-muted);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+tbody tr:hover {
+  background: #f3f4f6;
+}
+
+button {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.85rem;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: var(--color-primary);
+  color: #ffffff;
+  transition: background 0.15s;
+}
+
+button:hover {
+  background: var(--color-primary-hover);
+}
+
+button[hx-post*="unlink"] {
+  background: var(--color-danger);
+}
+
+button[hx-post*="unlink"]:hover {
+  background: var(--color-danger-hover);
+}
+
+input[type="text"] {
+  font-family: var(--font-sans);
+  font-size: 0.875rem;
+  padding: 0.35rem 0.6rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  width: 100%;
+  min-width: 200px;
+  outline: none;
+}
+
+input[type="text"]:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.2);
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 9999px;
+  background: var(--color-success-bg);
+  color: var(--color-success-text);
+  margin-left: 0.4rem;
+  vertical-align: middle;
+}
+
+.no-results {
+  font-size: 0.875rem;
+  color: var(--color-muted);
+  padding: 0.5rem 0;
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.4rem 1rem;
+  margin: 1rem 0;
+}
+
+dt {
+  font-weight: 600;
+  color: var(--color-muted);
+  font-size: 0.875rem;
+}
+
+dd {
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+form {
+  display: inline;
+}
+
+.actions-row {
+  display: flex;
+  gap: 0.35rem;
+}
+
+p {
+  color: var(--color-muted);
+}
+
+/* ── Dialog / Modal ─────────────────────────────────── */
+
+dialog {
+  border: none;
+  border-radius: var(--radius);
+  padding: 0;
+  max-width: 900px;
+  width: 95vw;
+  max-height: 90vh;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+}
+
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.modal-content {
+  display: flex;
+  flex-direction: column;
+  max-height: 90vh;
+  overflow: hidden;
+}
+
+.modal-panels {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+}
+
+.modal-left {
+  background: var(--color-bg);
+  border-right: 1px solid var(--color-border);
+  padding: 1.25rem;
+  overflow-y: auto;
+}
+
+.modal-left h3 {
+  margin: 0.25rem 0 0.2rem;
+  font-size: 1rem;
+}
+
+.modal-author {
+  font-size: 0.875rem;
+  color: var(--color-muted);
+  margin-bottom: 0.75rem;
+}
+
+.modal-right {
+  padding: 1.25rem;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.modal-footer {
+  border-top: 1px solid var(--color-border);
+  padding: 0.75rem 1.25rem;
+  display: flex;
+  justify-content: flex-end;
+  background: var(--color-surface);
+}
+
+.modal-footer button {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.modal-footer button:hover {
+  background: var(--color-bg);
+}
+
+.modal-section-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  margin: 1rem 0 0.3rem;
+}
+
+.modal-section-label:first-child {
+  margin-top: 0;
+}
+
+.modal-fields {
+  margin: 0 0 0.5rem;
+}
+
+.identifier-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.5rem;
+}
+
+.id-tag {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 9999px;
+}
+
+.id-tag-hardcover {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+
+.id-tag-isbn {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.id-tag-asin {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* ── Modal search bar ───────────────────────────────── */
+
+.modal-search-bar input[type="text"] {
+  width: 100%;
+  font-size: 0.95rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.modal-search-results {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.search-loading {
+  text-align: center;
+  padding: 2rem;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+/* ── Search result cards ────────────────────────────── */
+
+.search-results-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.search-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+}
+
+.result-cover {
+  flex-shrink: 0;
+  width: 60px;
+}
+
+.result-cover img {
+  width: 60px;
+  height: 90px;
+  object-fit: cover;
+  border-radius: 3px;
+  display: block;
+}
+
+.no-cover {
+  width: 60px;
+  height: 90px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.65rem;
+  color: var(--color-muted);
+  text-align: center;
+}
+
+.result-details {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.result-title {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.result-author {
+  font-size: 0.8rem;
+  color: var(--color-muted);
+}
+
+.result-series {
+  font-size: 0.8rem;
+  color: var(--color-primary);
+}
+
+.result-slug {
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  font-family: monospace;
+}
+
+.result-status {
+  font-size: 0.75rem;
+  color: var(--color-success-text);
+  background: var(--color-success-bg);
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 9999px;
+  align-self: flex-start;
+}
+
+.result-edition {
+  font-size: 0.72rem;
+  color: var(--color-muted);
+  font-family: monospace;
+  margin-top: 0.15rem;
+}
+
+.edition-label {
+  font-weight: 700;
+  font-style: normal;
+}
+
+.link-btn {
+  flex-shrink: 0;
+  align-self: center;
+}

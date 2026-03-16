@@ -1,0 +1,82 @@
+{{define "books.html"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Books – Readest–Hardcover Sync</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+</head>
+<body>
+  <header>
+    <nav><a href="/books">Books</a> | <a href="/status">Status</a></nav>
+    <h1>Readest–Hardcover Sync</h1>
+  </header>
+  <main>
+    <h2>Books</h2>
+
+    {{if .Matched}}
+    <h3>Matched ({{len .Matched}})</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Author</th>
+          <th>Status</th>
+          <th>Progress</th>
+          <th>Match</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Matched}}
+        {{template "book_row.html" .}}
+        {{end}}
+      </tbody>
+    </table>
+    {{end}}
+
+    {{if .Unmatched}}
+    <h3>Unmatched ({{len .Unmatched}})</h3>
+    <table>
+      <thead>
+        <tr>
+          <th>Title</th>
+          <th>Author</th>
+          <th>Status</th>
+          <th>Progress</th>
+          <th>Match</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {{range .Unmatched}}
+        {{template "book_row.html" .}}
+        {{end}}
+      </tbody>
+    </table>
+    {{end}}
+
+    {{if and (eq (len .Matched) 0) (eq (len .Unmatched) 0)}}
+    <p>No books found. Sync will populate books from your Readest library.</p>
+    {{end}}
+
+    <dialog id="link-modal"></dialog>
+  </main>
+  <script>
+  var modal = document.getElementById('link-modal');
+  modal.addEventListener('click', function(e) {
+    if (e.target === this) this.close();
+  });
+  document.body.addEventListener('htmx:afterSwap', function(e) {
+    if (e.detail.target === modal) {
+      modal.showModal();
+    }
+  });
+  document.body.addEventListener('closeModal', function() {
+    modal.close();
+  });
+  </script>
+</body>
+</html>
+{{end}}

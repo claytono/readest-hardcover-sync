@@ -1,0 +1,10 @@
+.envrc.local
+state.json
+.git
+.go/
+.direnv/
+.tmp/
+.superpowers/
+/data/
+node_modules/
+coverage.out

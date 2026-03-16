@@ -1,0 +1,33 @@
+# Temporary files
+.tmp/
+.superpowers/
+
+# Direnv
+.direnv/
+.envrc.local
+
+# Go module cache (project-local)
+.go/
+
+# Binary
+/readest-hardcover-sync
+
+# State and credentials
+state.json
+
+# Data volume
+/data/
+
+# Nix result link
+result
+
+# Test/lint artifacts
+coverage.out
+node_modules/
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

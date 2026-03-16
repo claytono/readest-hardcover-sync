@@ -1,0 +1,56 @@
+{{define "link_modal.html"}}
+<div class="modal-content">
+  <div class="modal-panels">
+    <!-- Left panel: Readest book info -->
+    <div class="modal-left">
+      <div class="modal-section-label">Your Book (Readest)</div>
+      <h3>{{.Book.Title}}</h3>
+      <div class="modal-author">{{.Book.Author}}</div>
+      <dl class="modal-fields">
+        {{if .Series}}<dt>Series</dt><dd>{{.Series}}</dd>{{end}}
+        <dt>Status</dt><dd>{{if .Book.ReadestStatus}}{{.Book.ReadestStatus}}{{else}}—{{end}}</dd>
+        <dt>Progress</dt><dd>{{index .Book.ReadestProgress 0}}/{{index .Book.ReadestProgress 1}} pages</dd>
+        <dt>Format</dt><dd>EPUB</dd>
+      </dl>
+      {{if .Identifiers}}
+      <div class="modal-section-label">Identifiers</div>
+      <div class="identifier-tags">
+        {{range .Identifiers.HardcoverSlugs}}<span class="id-tag id-tag-hardcover">hardcover: {{.}}</span>{{end}}
+        {{range .Identifiers.ISBN13s}}<span class="id-tag id-tag-isbn">ISBN-13: {{.}}</span>{{end}}
+        {{range .Identifiers.ISBN10s}}<span class="id-tag id-tag-isbn">ISBN-10: {{.}}</span>{{end}}
+        {{range .Identifiers.ASINs}}<span class="id-tag id-tag-asin">ASIN: {{.}}</span>{{end}}
+      </div>
+      {{end}}
+      {{if .Book.HardcoverBookID}}
+      <div class="modal-section-label">Current Match</div>
+      <dl class="modal-fields">
+        <dt>Slug</dt><dd>{{.Book.HardcoverSlug}}</dd>
+        <dt>Method</dt><dd>{{.Book.MatchMethod}}</dd>
+        <dt>Edition</dt><dd>{{.Book.EditionID}}</dd>
+      </dl>
+      {{end}}
+    </div>
+    <!-- Right panel: Hardcover search -->
+    <div class="modal-right">
+      <div class="modal-search-bar">
+        <input type="text"
+          id="modal-search-input"
+          value="{{.Book.Title}}"
+          hx-get="/books/{{.Book.BookHash}}/search"
+          hx-target="#modal-search-results"
+          hx-trigger="input changed delay:500ms, load"
+          hx-include="this"
+          name="q"
+          autocomplete="off"
+          placeholder="Search Hardcover…">
+      </div>
+      <div id="modal-search-results" class="modal-search-results">
+        <div class="search-loading">Searching Hardcover…</div>
+      </div>
+    </div>
+  </div>
+  <div class="modal-footer">
+    <button type="button" onclick="document.getElementById('link-modal').close()">Cancel</button>
+  </div>
+</div>
+{{end}}

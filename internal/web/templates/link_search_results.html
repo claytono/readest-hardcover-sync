@@ -1,0 +1,49 @@
+{{define "link_search_results.html"}}
+{{if .Results}}
+<div class="search-results-list">
+  {{range .Results}}
+  <div class="search-result">
+    <div class="result-cover">
+      {{if .CoverURL}}<img src="{{.CoverURL}}" alt="cover">{{else}}<div class="no-cover">No cover</div>{{end}}
+    </div>
+    <div class="result-details">
+      <div class="result-title"><a href="https://hardcover.app/books/{{.Slug}}" target="_blank">{{.Title}}</a></div>
+      <div class="result-author">{{.Author}}</div>
+      {{if .Series}}<div class="result-series">{{.Series}}</div>{{end}}
+      <div class="result-slug">{{.Slug}}</div>
+      {{if .UserStatus}}<div class="result-status">Your status: {{.UserStatus}}</div>{{end}}
+      {{if .EbookEdition}}
+      <div class="result-edition">
+        <span class="edition-label">Ebook:</span>
+        {{.EbookEdition.Format}}
+        {{if .EbookEdition.Pages}} · {{.EbookEdition.Pages}} pages{{end}}
+        {{if .EbookEdition.ISBN13}} · ISBN-13: {{.EbookEdition.ISBN13}}{{end}}
+        {{if .EbookEdition.ASIN}} · ASIN: {{.EbookEdition.ASIN}}{{end}}
+        {{if .EbookEdition.Publisher}} · {{.EbookEdition.Publisher}}{{end}}
+      </div>
+      {{end}}
+      {{if .PhysicalEdition}}
+      <div class="result-edition">
+        <span class="edition-label">Physical:</span>
+        {{.PhysicalEdition.Format}}
+        {{if .PhysicalEdition.Pages}} · {{.PhysicalEdition.Pages}} pages{{end}}
+        {{if .PhysicalEdition.ISBN13}} · ISBN-13: {{.PhysicalEdition.ISBN13}}{{end}}
+        {{if .PhysicalEdition.ISBN10}} · ISBN-10: {{.PhysicalEdition.ISBN10}}{{end}}
+        {{if .PhysicalEdition.Publisher}} · {{.PhysicalEdition.Publisher}}{{end}}
+      </div>
+      {{end}}
+    </div>
+    <form hx-post="/books/{{$.Hash}}/link" hx-target="#book-{{$.Hash}}" hx-swap="outerHTML">
+      <input type="hidden" name="book_id" value="{{.BookID}}">
+      <input type="hidden" name="slug" value="{{.Slug}}">
+      <input type="hidden" name="edition_id" value="{{.EditionID}}">
+      <input type="hidden" name="edition_pages" value="{{.EditionPages}}">
+      <button type="submit" class="link-btn" hx-on::after-request="document.getElementById('link-modal').close()">Link</button>
+    </form>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<p class="no-results">No results found.</p>
+{{end}}
+{{end}}

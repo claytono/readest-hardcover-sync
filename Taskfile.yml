@@ -1,0 +1,32 @@
+version: "3"
+
+vars:
+  BINARY: readest-hardcover-sync
+
+tasks:
+  build:
+    desc: Build binary
+    cmds:
+      - go build -o {{.BINARY}} ./cmd/readest-hardcover-sync
+
+  test:
+    desc: Run tests
+    cmds:
+      - go test ./...
+
+  coverage:
+    desc: Run tests with coverage
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go-test-coverage --config .testcoverage.yaml
+
+  lint:
+    desc: Run pre-commit hooks
+    cmds:
+      - ./scripts/lint
+
+  run:
+    desc: Build and run
+    deps: [build]
+    cmds:
+      - ./{{.BINARY}}

@@ -1,0 +1,34 @@
+{{define "book_row.html"}}<tr id="book-{{.BookHash}}">
+  <td>{{.Title}}</td>
+  <td>{{.Author}}</td>
+  <td>{{.ReadestStatus}}</td>
+  <td>{{index .ReadestProgress 0}}/{{index .ReadestProgress 1}}</td>
+  <td>
+    {{if .HardcoverBookID}}
+      <a href="https://hardcover.app/books/{{.HardcoverSlug}}" target="_blank">{{.HardcoverSlug}}</a>
+      <span class="badge">{{.MatchMethod}}</span>
+    {{else}}
+      <em>unmatched</em>
+    {{end}}
+  </td>
+  <td>
+    <div class="actions-row">
+    {{if .HardcoverBookID}}
+      <button
+        hx-post="/books/{{.BookHash}}/unlink"
+        hx-target="#book-{{.BookHash}}"
+        hx-swap="outerHTML">Unlink</button>
+      <button
+        hx-get="/books/{{.BookHash}}/link-modal"
+        hx-target="#link-modal"
+>Review</button>
+    {{else}}
+      <button
+        hx-get="/books/{{.BookHash}}/link-modal"
+        hx-target="#link-modal"
+>Link</button>
+    {{end}}
+    </div>
+  </td>
+</tr>
+{{end}}
