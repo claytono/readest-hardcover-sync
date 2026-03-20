@@ -205,3 +205,49 @@ func TestState_IsMatched(t *testing.T) {
 	s.SetBook("matched", BookState{BookHash: "matched", Title: "Matched Book", HardcoverBookID: 5})
 	assert.True(t, s.IsMatched("matched"))
 }
+
+// TestState_Load_InvalidJSON verifies that Load returns an error when the state
+// file contains malformed JSON.
+func TestState_Load_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	err := os.WriteFile(path, []byte("{not valid json"), 0o644)
+	require.NoError(t, err)
+
+	s := New(path)
+	err = s.Load()
+	require.Error(t, err)
+}
+
+// TestState_Load_NullBooks verifies that Load initialises Books to an empty
+// map when the JSON contains `"books": null`.
+func TestState_Load_NullBooks(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	err := os.WriteFile(path, []byte(`{"last_book_sync":0,"last_config_sync":0,"books":null}`), 0o644)
+	require.NoError(t, err)
+
+	s := New(path)
+	err = s.Load()
+	require.NoError(t, err)
+	assert.NotNil(t, s.Books)
+	assert.Empty(t, s.Books)
+}
+
+// TestState_Save_WriteError verifies that Save returns an error when the
+// destination directory is read-only (WriteFile on the .tmp path fails).
+func TestState_Save_WriteError(t *testing.T) {
+	dir := t.TempDir()
+	// Make the directory read-only so WriteFile fails.
+	require.NoError(t, os.Chmod(dir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+
+	path := filepath.Join(dir, "state.json")
+	s := New(path)
+	s.SetBook("h1", BookState{BookHash: "h1", Title: "Book"})
+
+	err := s.Save()
+	require.Error(t, err)
+}

@@ -143,5 +143,8 @@ func editionToResult(ed *hardcover.Edition, method string) *MatchResult {
 	if ed.ReadingFormatID != nil {
 		result.ReadingFormatID = *ed.ReadingFormatID
 	}
+	if result.ReadingFormatID == 0 {
+		result.ReadingFormatID = hardcover.ReadingFormatEBook
+	}
 	return result
 }

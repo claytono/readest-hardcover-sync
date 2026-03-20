@@ -177,3 +177,82 @@ func TestClient_AuthError(t *testing.T) {
 	assert.Nil(t, books)
 	assert.Contains(t, err.Error(), "403")
 }
+
+// TestClient_PullConfigs_Error verifies that PullConfigs propagates errors from
+// the underlying pull call (non-200 response).
+func TestClient_PullConfigs_Error(t *testing.T) {
+	syncSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(syncSrv.Close)
+
+	auth := newTestAuth(t)
+	client := readest.NewClient(auth)
+	client.SetBaseURL(syncSrv.URL)
+
+	configs, err := client.PullConfigs(t.Context(), 0)
+	assert.Error(t, err)
+	assert.Nil(t, configs)
+	assert.Contains(t, err.Error(), "500")
+}
+
+// TestClient_PullBooks_InvalidJSON verifies that pull returns an error when the
+// server responds with 200 but a non-JSON body.
+func TestClient_PullBooks_InvalidJSON(t *testing.T) {
+	syncSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("this is not json"))
+	}))
+	t.Cleanup(syncSrv.Close)
+
+	auth := newTestAuth(t)
+	client := readest.NewClient(auth)
+	client.SetBaseURL(syncSrv.URL)
+
+	books, err := client.PullBooks(t.Context(), 0)
+	require.Error(t, err)
+	assert.Nil(t, books)
+	assert.Contains(t, err.Error(), "decoding sync response")
+}
+
+// newFailingAuth returns an Auth whose Token() always returns an error because
+// its auth URL points to a server that has already been closed.
+func newFailingAuth(t *testing.T) *readest.Auth {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close() // close immediately so every request fails
+
+	auth, err := readest.NewAuth("user@example.com", "bad-password")
+	require.NoError(t, err)
+	auth.SetAuthURL(srv.URL)
+	return auth
+}
+
+// TestClient_TokenError verifies that pull propagates an error when the auth
+// token cannot be obtained.
+func TestClient_TokenError(t *testing.T) {
+	auth := newFailingAuth(t)
+	client := readest.NewClient(auth)
+
+	books, err := client.PullBooks(t.Context(), 0)
+	require.Error(t, err)
+	assert.Nil(t, books)
+	assert.Contains(t, err.Error(), "getting auth token")
+}
+
+// TestClient_NetworkError verifies that pull propagates a transport-level error
+// when the sync server is unreachable.
+func TestClient_NetworkError(t *testing.T) {
+	// Create a server just to capture its URL, then close it immediately.
+	syncSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	syncURL := syncSrv.URL
+	syncSrv.Close()
+
+	auth := newTestAuth(t)
+	client := readest.NewClient(auth)
+	client.SetBaseURL(syncURL)
+
+	books, err := client.PullBooks(t.Context(), 0)
+	require.Error(t, err)
+	assert.Nil(t, books)
+}

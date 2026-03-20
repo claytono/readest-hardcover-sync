@@ -24,3 +24,21 @@ repos:
         language: system
         pass_filenames: false
         files: \.go$
+
+  - repo: https://github.com/renovatebot/pre-commit-hooks
+    rev: 42.84.0
+    hooks:
+      - id: renovate-config-validator
+
+  - repo: local
+    hooks:
+      - id: go-test-coverage
+        name: go-test-coverage
+        entry:
+          bash -c 'export GOPATH="$(pwd)/.go" GOMODCACHE="$(pwd)/.go/pkg/mod"
+          GOCACHE="$(pwd)/.go/cache" && nix develop --command bash -c "go test
+          -coverprofile=coverage.out ./... && go-test-coverage --config
+          .testcoverage.yaml"'
+        language: system
+        pass_filenames: false
+        files: \.go$

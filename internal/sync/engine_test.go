@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -571,6 +572,641 @@ func (f *failFirstProgressUpdater) InsertUserBookRead(ctx context.Context, userB
 		return nil, f.insertReadErr
 	}
 	return f.mockProgressUpdater.InsertUserBookRead(ctx, userBookID, progressPages, editionID, startedAt, finishedAt)
+}
+
+// signalingPuller wraps mockReadestPuller, counts PullBooks calls, and signals on each call.
+type signalingPuller struct {
+	*mockReadestPuller
+	count  *int
+	called chan struct{} // receives a value on each PullBooks call
+}
+
+func (s *signalingPuller) PullBooks(ctx context.Context, since int64) ([]readest.DBBook, error) {
+	*s.count++
+	select {
+	case s.called <- struct{}{}:
+	default:
+	}
+	return s.mockReadestPuller.PullBooks(ctx, since)
+}
+
+// TestEngine_Run: Run calls Tick immediately then stops when context is cancelled.
+func TestEngine_Run(t *testing.T) {
+	callCount := 0
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+
+	called := make(chan struct{}, 10)
+	sp := &signalingPuller{mockReadestPuller: puller, count: &callCount, called: called}
+	engine.readest = sp
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Use a very long interval so only the initial tick fires before cancel.
+		engine.Run(ctx, 10*time.Minute)
+	}()
+
+	// Wait for the initial tick to fire.
+	select {
+	case <-called:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial tick did not fire")
+	}
+	cancel()
+
+	select {
+	case <-done:
+		// Run returned after cancel — correct.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop after context cancel")
+	}
+	assert.GreaterOrEqual(t, callCount, 1, "Run should have called Tick at least once immediately")
+}
+
+// TestEngine_Run_TickOnInterval: Run fires Tick again on the ticker interval.
+func TestEngine_Run_TickOnInterval(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+
+	callCount := 0
+	called := make(chan struct{}, 10)
+	sp := &signalingPuller{mockReadestPuller: puller, count: &callCount, called: called}
+	engine.readest = sp
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		engine.Run(ctx, 20*time.Millisecond)
+	}()
+
+	// Wait for at least 2 ticks (initial + at least one interval).
+	for i := 0; i < 2; i++ {
+		select {
+		case <-called:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("tick %d did not fire", i+1)
+		}
+	}
+	cancel()
+
+	<-done
+	assert.GreaterOrEqual(t, callCount, 2, "Run should have ticked at least twice")
+}
+
+// TestEngine_SyncNow: Verifies SyncNow uses the real updater even in manual sync mode.
+func TestEngine_SyncNow(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	realUpdater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	matcher := NewMatcher(finder, false)
+	logger := newNopLogger()
+
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true)
+
+	// In manual sync mode, engine.updater is the dry-run wrapper.
+	assert.NotEqual(t, realUpdater, engine.updater, "manual mode should use dry-run updater for polling")
+
+	// SyncNow should use the real updater and return no error.
+	err = engine.SyncNow(context.Background())
+	require.NoError(t, err)
+
+	// After SyncNow completes, updater should be restored to dry-run.
+	assert.NotEqual(t, realUpdater, engine.updater, "updater should be restored to dry-run after SyncNow")
+}
+
+// TestEngine_ManualSync_TickUsesDryRun: In manual mode, Tick uses dry-run (no real writes).
+func TestEngine_ManualSync_TickUsesDryRun(t *testing.T) {
+	isbn := "9781234567890"
+	pages := 400
+	editionID := 10
+	edition := &hardcover.Edition{
+		ID:     editionID,
+		BookID: 100,
+		Pages:  &pages,
+		ISBN13: isbn,
+	}
+
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash:  "hashM1",
+				Title:     "Manual Book",
+				Metadata:  metaWithISBN(isbn),
+				UpdatedAt: "2024-01-01T00:00:00Z",
+			},
+		},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashM1",
+				Progress:  "[200,400]",
+				UpdatedAt: "2024-01-01T00:01:00Z",
+			},
+		},
+	}
+
+	finder := &mockBookFinder{
+		byISBN13: map[string]*hardcover.Edition{isbn: edition},
+	}
+	realUpdater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	matcher := NewMatcher(finder, false)
+	logger := newNopLogger()
+
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true)
+
+	err = engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	// In manual mode Tick uses dry-run: no real InsertUserBook calls.
+	assert.Empty(t, realUpdater.insertUserBookCalls, "manual mode Tick must not call real InsertUserBook")
+}
+
+// TestEngine_ConcurrentTick_SecondReturnsNil: Calling Tick while another is in
+// progress should return nil immediately (skip).
+func TestEngine_ConcurrentTick_SecondReturnsNil(t *testing.T) {
+	// Use a slow puller to keep the first Tick busy.
+	blocker := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	slowPuller := &blockingPuller{ready: blocker, entered: entered}
+
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	matcher := NewMatcher(finder, false)
+	logger := newNopLogger()
+	engine := NewEngine(slowPuller, finder, updater, st, matcher, logger, false)
+
+	// Start first Tick in background — it will block on PullBooks.
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- engine.Tick(context.Background())
+	}()
+
+	// Wait for the first Tick to enter PullBooks (meaning it holds the lock).
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("first Tick did not enter PullBooks")
+	}
+
+	// Second Tick should return nil immediately (skipped).
+	err = engine.Tick(context.Background())
+	assert.NoError(t, err, "second concurrent Tick should return nil")
+
+	// Unblock the first Tick.
+	close(blocker)
+	require.NoError(t, <-firstDone)
+}
+
+// blockingPuller blocks PullBooks until the ready channel is closed.
+// It signals on entered when PullBooks is called (so callers know the lock is held).
+type blockingPuller struct {
+	ready   chan struct{}
+	entered chan struct{}
+}
+
+func (b *blockingPuller) PullBooks(_ context.Context, _ int64) ([]readest.DBBook, error) {
+	if b.entered != nil {
+		select {
+		case b.entered <- struct{}{}:
+		default:
+		}
+	}
+	<-b.ready
+	return nil, nil
+}
+
+func (b *blockingPuller) PullConfigs(_ context.Context, _ int64) ([]readest.DBBookConfig, error) {
+	return nil, nil
+}
+
+// TestEngine_DeletedBook_Skipped: A book with DeletedAt set should be skipped.
+func TestEngine_DeletedBook_Skipped(t *testing.T) {
+	deletedAt := "2024-01-01T00:00:00Z"
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash:  "hashDel",
+				Title:     "Deleted Book",
+				UpdatedAt: "2024-01-01T00:00:00Z",
+				DeletedAt: &deletedAt,
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	_, ok := st.GetBook("hashDel")
+	assert.False(t, ok, "deleted book should not be added to state")
+}
+
+// TestEngine_DeletedConfig_Skipped: A config with DeletedAt set should be skipped.
+func TestEngine_DeletedConfig_Skipped(t *testing.T) {
+	deletedAt := "2024-01-01T00:00:00Z"
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashDelCfg",
+				Progress:  "[100,400]",
+				UpdatedAt: "2024-01-01T00:00:00Z",
+				DeletedAt: &deletedAt,
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+
+	// Pre-populate a matched book so the config would be processed if not deleted.
+	engine.state.SetBook("hashDelCfg", state.BookState{
+		BookHash:        "hashDelCfg",
+		Title:           "Some Book",
+		HardcoverBookID: 500,
+		EditionID:       50,
+		EditionPages:    400,
+		UserBookID:      9,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	// No Hardcover write calls should have been made.
+	assert.Empty(t, updater.insertUserBookCalls)
+	assert.Empty(t, updater.updateUserBookCalls)
+	assert.Empty(t, updater.insertUserReadCalls)
+	assert.Empty(t, updater.updateUserReadCalls)
+}
+
+// TestEngine_ProcessBook_UpdatesReadestStatus: Book already in state; ReadingStatus
+// changed — verify state is updated but no Hardcover calls made.
+func TestEngine_ProcessBook_UpdatesReadestStatus(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash:      "hashRS",
+				Title:         "Status Book",
+				UpdatedAt:     "2024-02-01T00:00:00Z",
+				ReadingStatus: "finished",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashRS", state.BookState{
+		BookHash:        "hashRS",
+		Title:           "Status Book",
+		HardcoverBookID: 600,
+		ReadestStatus:   "reading",
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	bs, ok := st.GetBook("hashRS")
+	require.True(t, ok)
+	assert.Equal(t, "finished", bs.ReadestStatus, "ReadestStatus should be updated in state")
+
+	// processBook only updates state — no Hardcover writes.
+	assert.Empty(t, updater.insertUserBookCalls)
+	assert.Empty(t, updater.updateUserBookCalls)
+}
+
+// TestEngine_ParseTimestamp covers the various parseTimestamp branches.
+func TestEngine_ParseTimestamp(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		check func(t *testing.T, got int64)
+	}{
+		{
+			name:  "empty string returns 0",
+			input: "",
+			check: func(t *testing.T, got int64) { assert.Equal(t, int64(0), got) },
+		},
+		{
+			name:  "RFC3339 string",
+			input: "2024-06-15T10:00:00Z",
+			check: func(t *testing.T, got int64) { assert.Greater(t, got, int64(0)) },
+		},
+		{
+			name:  "non-TZ format",
+			input: "2024-06-15T10:00:00",
+			check: func(t *testing.T, got int64) { assert.Greater(t, got, int64(0)) },
+		},
+		{
+			name:  "unparseable string returns 0",
+			input: "not-a-timestamp",
+			check: func(t *testing.T, got int64) { assert.Equal(t, int64(0), got) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseTimestamp(tt.input)
+			tt.check(t, got)
+		})
+	}
+}
+
+// TestEngine_StatusName covers known and unknown status IDs.
+func TestEngine_StatusName(t *testing.T) {
+	engine := &Engine{
+		statusNames: map[int]string{
+			1: "Want to Read",
+			2: "Currently Reading",
+			3: "Read",
+		},
+	}
+	assert.Equal(t, "Want to Read", engine.statusName(1))
+	assert.Equal(t, "Currently Reading", engine.statusName(2))
+	assert.Equal(t, "Read", engine.statusName(3))
+	assert.Equal(t, "unknown(99)", engine.statusName(99))
+}
+
+// TestEngine_PullBooks_Error: PullBooks returns an error — Tick should propagate it.
+func TestEngine_PullBooks_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		bookErr: errors.New("readest down"),
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	err := engine.Tick(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "readest down")
+}
+
+// TestEngine_PullConfigs_Error: PullConfigs returns an error — Tick should propagate it.
+func TestEngine_PullConfigs_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:  []readest.DBBook{},
+		cfgErr: errors.New("config fetch failed"),
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	err := engine.Tick(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "config fetch failed")
+}
+
+// TestEngine_GetMe_Error: GetMe returns an error — Tick should propagate it.
+func TestEngine_GetMe_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meErr: errors.New("auth failed"),
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	err := engine.Tick(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "auth failed")
+}
+
+// TestEngine_ProcessConfig_NoEditionPages: EditionPages == 0 — should update status
+// but skip progress update.
+func TestEngine_ProcessConfig_NoEditionPages(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashNP",
+				Progress:  "[200,400]",
+				UpdatedAt: "2024-03-01T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashNP", state.BookState{
+		BookHash:        "hashNP",
+		Title:           "No Pages Book",
+		HardcoverBookID: 700,
+		EditionID:       70,
+		EditionPages:    0, // no pages known
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	// Status should be updated (InsertUserBook with status 2).
+	require.Len(t, updater.insertUserBookCalls, 1)
+	assert.Equal(t, 2, updater.insertUserBookCalls[0].statusID)
+
+	// No progress read calls.
+	assert.Empty(t, updater.insertUserReadCalls, "no InsertUserBookRead when EditionPages==0")
+	assert.Empty(t, updater.updateUserReadCalls, "no UpdateUserBookRead when EditionPages==0")
+}
+
+// TestEngine_ProcessConfig_ExistingUserBook: GetUserBook returns an existing record —
+// InsertUserBook should NOT be called.
+func TestEngine_ProcessConfig_ExistingUserBook(t *testing.T) {
+	existingUserBook := &hardcover.UserBook{ID: 55, BookID: 800, StatusID: 1}
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashEUB",
+				Progress:  "[100,400]",
+				UpdatedAt: "2024-03-02T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		userBook:   existingUserBook,
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	pages := 400
+	st.SetBook("hashEUB", state.BookState{
+		BookHash:        "hashEUB",
+		Title:           "Existing UB Book",
+		HardcoverBookID: 800,
+		EditionID:       80,
+		EditionPages:    pages,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	assert.Empty(t, updater.insertUserBookCalls, "InsertUserBook must not be called when user book already exists")
+
+	// The existing user book ID should be used for the read.
+	require.Len(t, updater.insertUserReadCalls, 1)
+	assert.Equal(t, 55, updater.insertUserReadCalls[0].userBookID)
+}
+
+// TestEngine_ProcessConfig_GetUserBook_Error: GetUserBook returns error — processConfig
+// should return error and Tick should log it (but not stop overall).
+func TestEngine_ProcessConfig_GetUserBook_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashGUBErr",
+				Progress:  "[100,400]",
+				UpdatedAt: "2024-03-03T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		getUserErr: errors.New("get user book failed"),
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashGUBErr", state.BookState{
+		BookHash:        "hashGUBErr",
+		Title:           "Error Book",
+		HardcoverBookID: 900,
+		EditionID:       90,
+		EditionPages:    400,
+	})
+
+	// Tick should succeed overall (error is logged, not propagated).
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+}
+
+// TestEngine_ProcessConfig_InsertUserBook_Error: InsertUserBook returns error —
+// processConfig returns error, logged by Tick.
+func TestEngine_ProcessConfig_InsertUserBook_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashIUBErr",
+				Progress:  "[100,400]",
+				UpdatedAt: "2024-03-04T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse:        &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		insertUserBookErr: errors.New("insert user book failed"),
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashIUBErr", state.BookState{
+		BookHash:        "hashIUBErr",
+		Title:           "Insert Error Book",
+		HardcoverBookID: 901,
+		EditionID:       91,
+		EditionPages:    400,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err) // error is logged, Tick itself succeeds
+}
+
+// TestEngine_ProcessConfig_UpdateUserBook_Error: UpdateUserBook returns error.
+func TestEngine_ProcessConfig_UpdateUserBook_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashUUBErr",
+				Progress:  "[100,400]",
+				UpdatedAt: "2024-03-05T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse:        &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		updateUserBookErr: errors.New("update user book failed"),
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashUUBErr", state.BookState{
+		BookHash:        "hashUUBErr",
+		Title:           "Update Error Book",
+		HardcoverBookID: 902,
+		EditionID:       92,
+		EditionPages:    400,
+		UserBookID:      20,
+		LastStatusSent:  1, // different from what DeriveStatus will return (2)
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err) // error is logged, Tick itself succeeds
 }
 
 // TestEngine_TimestampFromRecords: PullBooks returns records with updated_at times.
