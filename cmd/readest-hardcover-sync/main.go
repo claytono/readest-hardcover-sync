@@ -26,16 +26,18 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	if len(os.Args) < 2 {
-		runServer(logger)
-		return
+		printUsage()
+		os.Exit(1)
 	}
 
 	switch os.Args[1] {
+	case "serve":
+		runServer(logger)
 	case "check-readest-auth":
 		runCheckReadestAuth(logger)
 	case "check-hardcover-auth":
 		runCheckHardcoverAuth(logger)
-	case "list-books":
+	case "list-readest-books":
 		runListBooks(logger)
 	case "lookup":
 		runLookup(logger)
@@ -48,12 +50,12 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s [subcommand]\n\n", filepath.Base(os.Args[0]))
+	fmt.Fprintf(os.Stderr, "Usage: %s <subcommand>\n\n", filepath.Base(os.Args[0]))
 	fmt.Fprintln(os.Stderr, "Subcommands:")
-	fmt.Fprintln(os.Stderr, "  (none)               Start the sync server")
+	fmt.Fprintln(os.Stderr, "  serve                Start the sync server")
 	fmt.Fprintln(os.Stderr, "  check-readest-auth   Verify Readest credentials")
 	fmt.Fprintln(os.Stderr, "  check-hardcover-auth Verify Hardcover API token")
-	fmt.Fprintln(os.Stderr, "  list-books           List all books from Readest")
+	fmt.Fprintln(os.Stderr, "  list-readest-books   List all books from Readest")
 	fmt.Fprintln(os.Stderr, "  lookup <slug|isbn>   Look up a book on Hardcover")
 	fmt.Fprintln(os.Stderr, "  dry-run              Run a sync cycle without writing to Hardcover")
 }
@@ -83,7 +85,7 @@ func newHardcoverClient(cfg *config.Config) *hardcover.Client {
 	return hardcover.NewClient(cfg.HardcoverToken)
 }
 
-// runServer is the default mode: start the HTTP server and sync engine.
+// runServer starts the HTTP server and sync engine.
 func runServer(logger *slog.Logger) {
 	cfg := loadConfig(logger)
 
@@ -186,7 +188,7 @@ func runCheckHardcoverAuth(logger *slog.Logger) {
 
 // runListBooks pulls all books from Readest and prints them.
 func runListBooks(logger *slog.Logger) {
-	fs := flag.NewFlagSet("list-books", flag.ExitOnError)
+	fs := flag.NewFlagSet("list-readest-books", flag.ExitOnError)
 	_ = fs.Parse(os.Args[2:])
 
 	cfg := loadConfig(logger)

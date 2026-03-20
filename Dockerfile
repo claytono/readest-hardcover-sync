@@ -13,3 +13,4 @@ COPY --from=build /readest-hardcover-sync /usr/local/bin/
 COPY static/ /app/static/
 EXPOSE 8080
 ENTRYPOINT ["readest-hardcover-sync"]
+CMD ["serve"]

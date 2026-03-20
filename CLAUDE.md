@@ -31,7 +31,7 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 
 ## Architecture
 
-- Binary runs as server by default (no subcommand), also supports: `check-readest-auth`, `check-hardcover-auth`, `list-books`, `lookup`, `dry-run`
+- Binary requires a subcommand: `serve`, `check-readest-auth`, `check-hardcover-auth`, `list-readest-books`, `lookup`, `dry-run`
 - Sync engine polls Readest on interval, matches books to Hardcover via identifier fallback chain (slug → ISBN-13 → ISBN-10 → title), pushes status and progress
 - `MANUAL_SYNC=true`: polling still runs (reads from Readest, matches books) but uses a dry-run updater for Hardcover writes. Actual writes only via "Sync Now" in web UI.
 

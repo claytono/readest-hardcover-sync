@@ -29,4 +29,4 @@ tasks:
     desc: Build and run
     deps: [build]
     cmds:
-      - ./{{.BINARY}}
+      - ./{{.BINARY}} serve
