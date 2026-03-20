@@ -38,8 +38,13 @@
     <dt>Unmatched books</dt>
     <dd>{{.UnmatchedCount}}</dd>
   </dl>
-  <form hx-post="/sync" hx-target="#status-panel" hx-swap="outerHTML">
-    <button type="submit">Sync Now</button>
-  </form>
+  <div class="actions-row">
+    <form hx-post="/sync" hx-target="#status-panel" hx-swap="outerHTML">
+      <button type="submit">Sync Now</button>
+    </form>
+    <form hx-post="/full-sync" hx-target="#status-panel" hx-swap="outerHTML">
+      <button type="submit" hx-confirm="Re-pull all books and configs from Readest?">Full Sync</button>
+    </form>
+  </div>
 </div>
 {{end}}

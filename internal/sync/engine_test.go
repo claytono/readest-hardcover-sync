@@ -706,6 +706,110 @@ func TestEngine_SyncNow(t *testing.T) {
 	assert.NotEqual(t, realUpdater, engine.updater, "updater should be restored to dry-run after SyncNow")
 }
 
+// TestEngine_FullSync resets timestamps and uses real updater.
+func TestEngine_FullSync(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	realUpdater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	st.LastBookSync = 999
+	st.LastConfigSync = 888
+	matcher := NewMatcher(finder, false)
+	logger := newNopLogger()
+
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true)
+
+	err = engine.FullSync(context.Background())
+	require.NoError(t, err)
+
+	// Timestamps should have been reset (and remain 0 since puller returns no records).
+	assert.Equal(t, int64(0), st.LastBookSync)
+	assert.Equal(t, int64(0), st.LastConfigSync)
+}
+
+// TestEngine_PendingProgressSync verifies that matched books with stored progress
+// but no prior Hardcover sync get their progress pushed on the next tick.
+func TestEngine_PendingProgressSync(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		userBook:   &hardcover.UserBook{ID: 42},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+
+	// A book that was manually linked after its config was processed:
+	// has progress stored but nothing sent to Hardcover yet.
+	st.SetBook("hashPending", state.BookState{
+		BookHash:        "hashPending",
+		Title:           "Pending Book",
+		HardcoverBookID: 500,
+		HardcoverSlug:   "pending-book",
+		EditionID:       100,
+		EditionPages:    300,
+		ReadestProgress: [2]int{150, 300},
+		ReadestStatus:   "reading",
+		// LastStatusSent and LastProgressSent are both 0
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	bs, ok := st.GetBook("hashPending")
+	require.True(t, ok)
+	assert.NotEqual(t, 0, bs.LastStatusSent, "status should have been sent to Hardcover")
+	assert.NotEqual(t, 0, bs.LastProgressSent, "progress should have been sent to Hardcover")
+}
+
+// TestEngine_ProcessConfig_UnmatchedStoresProgress verifies that configs for
+// unmatched books still store the progress in state.
+func TestEngine_ProcessConfig_UnmatchedStoresProgress(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashUnmatched",
+				Progress:  "[200, 500]",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+
+	// Book exists in state but is unmatched.
+	st.SetBook("hashUnmatched", state.BookState{
+		BookHash:  "hashUnmatched",
+		Title:     "Unmatched Book",
+		Unmatched: true,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	bs, ok := st.GetBook("hashUnmatched")
+	require.True(t, ok)
+	assert.Equal(t, [2]int{200, 500}, bs.ReadestProgress, "progress should be stored even for unmatched books")
+	assert.Empty(t, updater.insertUserBookCalls, "should not write to Hardcover for unmatched books")
+}
+
 // TestEngine_ManualSync_TickUsesDryRun: In manual mode, Tick uses dry-run (no real writes).
 func TestEngine_ManualSync_TickUsesDryRun(t *testing.T) {
 	isbn := "9781234567890"
@@ -917,6 +1021,7 @@ func TestEngine_ProcessBook_UpdatesReadestStatus(t *testing.T) {
 		Title:           "Status Book",
 		HardcoverBookID: 600,
 		ReadestStatus:   "reading",
+		LastStatusSent:  2, // already synced as "currently reading"
 	})
 
 	err := engine.Tick(context.Background())
