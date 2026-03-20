@@ -52,7 +52,7 @@ go run ./cmd/readest-hardcover-sync check-readest-auth
 go run ./cmd/readest-hardcover-sync check-hardcover-auth
 
 # Start the server in manual sync mode
-MANUAL_SYNC=true go run ./cmd/readest-hardcover-sync
+MANUAL_SYNC=true go run ./cmd/readest-hardcover-sync serve
 ```
 
 ### Docker
@@ -93,10 +93,10 @@ Available at `http://localhost:8080`:
 
 | Command                | Description                                                            |
 | ---------------------- | ---------------------------------------------------------------------- |
-| _(none)_               | Start the server (default)                                             |
+| `serve`                | Start the sync server                                                  |
 | `check-readest-auth`   | Verify Readest credentials work                                        |
 | `check-hardcover-auth` | Verify Hardcover token works                                           |
-| `list-books`           | Pull and display all books from Readest with parsed identifiers        |
+| `list-readest-books`   | Pull and display all books from Readest with parsed identifiers        |
 | `lookup <slug\|isbn>`  | Look up a book on Hardcover by slug, ISBN-13, or ISBN-10               |
 | `dry-run`              | Run one sync cycle without writing to Hardcover (uses temporary state) |
 
