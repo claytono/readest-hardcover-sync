@@ -22,8 +22,9 @@ type Engine struct {
 	matcher     *Matcher
 	logger      *slog.Logger
 
-	mu      sync.Mutex // prevents concurrent Tick() calls
-	syncing bool
+	mu              sync.Mutex // prevents concurrent Tick() calls
+	syncing         bool
+	pendingFullSync bool // reset timestamps at start of next Tick
 
 	manualSync bool // true = dry-run updater for polling, real updater for SyncNow
 
@@ -83,6 +84,16 @@ func (e *Engine) SyncNow(ctx context.Context) error {
 	return e.Tick(ctx)
 }
 
+// FullSync requests a full re-pull of all books and configs from Readest.
+// Timestamps are reset at the start of the next Tick under the sync mutex.
+// Uses the real updater regardless of manual mode.
+func (e *Engine) FullSync(ctx context.Context) error {
+	e.mu.Lock()
+	e.pendingFullSync = true
+	e.mu.Unlock()
+	return e.SyncNow(ctx)
+}
+
 // Tick performs a single sync cycle. Returns immediately if a sync is already in progress.
 func (e *Engine) Tick(ctx context.Context) error {
 	e.mu.Lock()
@@ -92,6 +103,11 @@ func (e *Engine) Tick(ctx context.Context) error {
 		return nil
 	}
 	e.syncing = true
+	if e.pendingFullSync {
+		e.state.LastBookSync = 0
+		e.state.LastConfigSync = 0
+		e.pendingFullSync = false
+	}
 	e.mu.Unlock()
 
 	defer func() {
@@ -183,7 +199,29 @@ func (e *Engine) Tick(ctx context.Context) error {
 		}
 	}
 
-	// Step 4: Update state timestamps from max updated_at of returned records.
+	// Step 4: Sync matched books that have stored progress but haven't pushed to Hardcover yet.
+	// This covers books that were manually linked after their config was already processed.
+	for _, bs := range e.state.ListBooks() {
+		if bs.HardcoverBookID == 0 {
+			continue
+		}
+		if bs.LastStatusSent != 0 || bs.LastProgressSent != 0 {
+			continue
+		}
+		if bs.ReadestProgress[0] == 0 && bs.ReadestProgress[1] == 0 && bs.ReadestStatus == "" {
+			continue
+		}
+		// Synthesize a config from stored state to push to Hardcover.
+		synthCfg := readest.DBBookConfig{
+			BookHash: bs.BookHash,
+			Progress: fmt.Sprintf("[%d, %d]", bs.ReadestProgress[0], bs.ReadestProgress[1]),
+		}
+		if err := e.processConfig(ctx, synthCfg); err != nil {
+			e.logger.Error("failed to sync pending progress", "book_hash", bs.BookHash, "title", bs.Title, "error", err)
+		}
+	}
+
+	// Step 5: Update state timestamps from max updated_at of returned records.
 	if maxBookUpdatedAt > e.state.LastBookSync {
 		e.state.LastBookSync = maxBookUpdatedAt
 	}
@@ -191,7 +229,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		e.state.LastConfigSync = maxConfigUpdatedAt
 	}
 
-	// Step 5: Save state.
+	// Step 6: Save state.
 	e.logger.Info("sync tick complete",
 		"new_books", newBooks,
 		"updated_books", updatedBooks,
@@ -251,9 +289,9 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 
 // processConfig handles a single DBBookConfig: updates progress/status on Hardcover.
 func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) error {
-	// Get book from state; skip if not exists or not matched.
+	// Get book from state; skip if not in state at all.
 	bs, ok := e.state.GetBook(cfg.BookHash)
-	if !ok || bs.HardcoverBookID == 0 {
+	if !ok {
 		return nil
 	}
 
@@ -264,6 +302,15 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 	}
 
 	current, total := progress[0], progress[1]
+
+	// Always store Readest progress so it's available when the book gets linked later.
+	bs.ReadestProgress = [2]int{current, total}
+
+	// If not matched yet, save progress and stop — can't push to Hardcover.
+	if bs.HardcoverBookID == 0 {
+		e.state.SetBook(cfg.BookHash, bs)
+		return nil
+	}
 
 	// DeriveStatus; skip if 0.
 	statusID := DeriveStatus(current, total, bs.ReadestStatus)

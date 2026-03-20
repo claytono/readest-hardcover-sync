@@ -1035,3 +1035,117 @@ func TestHandleTriggerSync(t *testing.T) {
 	}
 	t.Fatal("background SyncNow goroutine did not complete within timeout")
 }
+
+// TestHandleTriggerSync_HtmxReturnsPartial verifies that an htmx POST /sync
+// returns the status_content partial instead of a redirect.
+func TestHandleTriggerSync_HtmxReturnsPartial(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "trigger-sync-htmx-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	st := state.New(tmpDir + "/state.json")
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync", nil)
+	req.Header.Set("HX-Request", "true")
+	rr := httptest.NewRecorder()
+	h.handleTriggerSync(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Sync Status") {
+		t.Error("expected body to contain 'Sync Status'")
+	}
+	if strings.Contains(body, "<!DOCTYPE html>") {
+		t.Error("htmx response should not contain full HTML document")
+	}
+}
+
+// TestHandleFullSync verifies that POST /full-sync redirects to /status.
+func TestHandleFullSync(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "full-sync-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	stateFile := tmpDir + "/state.json"
+	st := state.New(stateFile)
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodPost, "/full-sync", nil)
+	rr := httptest.NewRecorder()
+	h.handleFullSync(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Errorf("expected redirect 303, got %d", rr.Code)
+	}
+	if loc := rr.Header().Get("Location"); loc != "/status" {
+		t.Errorf("expected Location=/status, got %q", loc)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(stateFile); err == nil {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatal("background FullSync goroutine did not complete within timeout")
+}
+
+// TestHandleFullSync_HtmxReturnsPartial verifies that an htmx POST /full-sync
+// returns the status_content partial instead of a redirect.
+func TestHandleFullSync_HtmxReturnsPartial(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "full-sync-htmx-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	st := state.New(tmpDir + "/state.json")
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodPost, "/full-sync", nil)
+	req.Header.Set("HX-Request", "true")
+	rr := httptest.NewRecorder()
+	h.handleFullSync(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Sync Status") {
+		t.Error("expected body to contain 'Sync Status'")
+	}
+	if strings.Contains(body, "<!DOCTYPE html>") {
+		t.Error("htmx response should not contain full HTML document")
+	}
+}
+
+// TestHandleStatus_HtmxReturnsPartial verifies that an htmx GET /status
+// returns just the status_content partial, not the full page.
+func TestHandleStatus_HtmxReturnsPartial(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req.Header.Set("HX-Request", "true")
+	rr := httptest.NewRecorder()
+	h.handleStatus(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Sync Status") {
+		t.Error("expected body to contain 'Sync Status'")
+	}
+	if strings.Contains(body, "<!DOCTYPE html>") {
+		t.Error("htmx response should not contain full HTML document")
+	}
+}

@@ -43,6 +43,7 @@ func NewServer(st *state.State, finder syncsvc.BookFinder, updater syncsvc.Progr
 	mux.HandleFunc("POST /books/{hash}/unlink", h.handleUnlink)
 	mux.HandleFunc("GET /status", h.handleStatus)
 	mux.HandleFunc("POST /sync", h.handleTriggerSync)
+	mux.HandleFunc("POST /full-sync", h.handleFullSync)
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServer(http.Dir("static"))))
 
 	return &http.Server{Addr: addr, Handler: mux}

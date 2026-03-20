@@ -393,18 +393,42 @@ func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
 		UnmatchedCount: unmatched,
 	}
 
+	tmplName := "status.html"
+	if r.Header.Get("HX-Request") != "" {
+		tmplName = "status_content"
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.tmpl.ExecuteTemplate(w, "status.html", data); err != nil {
+	if err := h.tmpl.ExecuteTemplate(w, tmplName, data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
-// handleTriggerSync triggers a sync in the background and redirects to /status.
+// handleTriggerSync triggers a sync in the background and returns updated status.
 func (h *handlers) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("manual sync triggered")
 	go func() {
 		_ = h.engine.SyncNow(context.Background())
 	}()
+
+	if r.Header.Get("HX-Request") != "" {
+		h.handleStatus(w, r)
+		return
+	}
+	http.Redirect(w, r, "/status", http.StatusSeeOther)
+}
+
+// handleFullSync resets sync timestamps and re-pulls everything from Readest.
+func (h *handlers) handleFullSync(w http.ResponseWriter, r *http.Request) {
+	h.logger.Info("full sync triggered")
+	go func() {
+		_ = h.engine.FullSync(context.Background())
+	}()
+
+	if r.Header.Get("HX-Request") != "" {
+		h.handleStatus(w, r)
+		return
+	}
 	http.Redirect(w, r, "/status", http.StatusSeeOther)
 }
 
