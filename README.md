@@ -20,16 +20,17 @@ Each user runs their own instance. The service polls Readest's cloud for book an
 
 ### Environment variables
 
-| Variable             | Required | Default      | Description                                                                                         |
-| -------------------- | -------- | ------------ | --------------------------------------------------------------------------------------------------- |
-| `READEST_EMAIL`      | yes      |              | Your Readest account email                                                                          |
-| `READEST_PASSWORD`   | yes      |              | Your Readest account password                                                                       |
-| `HARDCOVER_TOKEN`    | yes      |              | Hardcover API token (may include "Bearer " prefix)                                                  |
-| `SYNC_INTERVAL`      | no       | `10m`        | How often to poll Readest                                                                           |
-| `LISTEN_ADDR`        | no       | `:8080`      | Web UI listen address                                                                               |
-| `STATE_FILE`         | no       | `state.json` | Path to the state file                                                                              |
-| `ENABLE_TITLE_MATCH` | no       | `false`      | Allow matching books by title search (may produce false matches)                                    |
-| `MANUAL_SYNC`        | no       | `false`      | If true, poll and match books but don't write to Hardcover until you click "Sync Now" in the web UI |
+| Variable             | Required | Default      | Description                                                                                     |
+| -------------------- | -------- | ------------ | ----------------------------------------------------------------------------------------------- |
+| `READEST_EMAIL`      | yes      |              | Your Readest account email                                                                      |
+| `READEST_PASSWORD`   | yes      |              | Your Readest account password                                                                   |
+| `HARDCOVER_TOKEN`    | yes      |              | Hardcover API token (may include "Bearer " prefix)                                              |
+| `SYNC_INTERVAL`      | no       | `10m`        | How often to poll Readest                                                                       |
+| `LISTEN_ADDR`        | no       | `:8080`      | Web UI listen address                                                                           |
+| `STATE_FILE`         | no       | `state.json` | Path to the state file                                                                          |
+| `ENABLE_TITLE_MATCH` | no       | `false`      | Allow matching books by title search (may produce false matches)                                |
+| `MANUAL_SYNC`        | no       | `false`      | If true, poll and match books but don't write to Hardcover until you click "Sync" in the web UI |
+| `COVERS_DIR`         | no       | `covers`     | Directory for cached book cover images                                                          |
 
 ### Local development
 
@@ -78,16 +79,22 @@ Set `MANUAL_SYNC=true` for first-time use. In this mode:
 - Reading progress is tracked locally but **not** pushed to Hardcover
 - Open the web UI at `http://localhost:8080` to review matches
 - Use the link modal to manually fix any incorrect matches
-- Click "Sync Now" on the status page when ready to push to Hardcover
+- Click "Sync" in the sidebar when ready to push to Hardcover
 
 Once you're confident the matching is correct, you can switch to automatic mode by removing `MANUAL_SYNC` or setting it to `false`.
 
 ## Web UI
 
-Available at `http://localhost:8080`:
+Available at `http://localhost:8080`. Single-page dark-themed interface:
 
-- **Books** — lists all matched and unmatched books. Click "Link" on unmatched books to search Hardcover and manually link them. Click "Review" on matched books to verify or change the match.
-- **Status** — shows last sync times, book counts, and a "Sync Now" button.
+- **Sidebar** — sync status, Sync/Resync All buttons, and a real-time sync log
+- **Book grid** — card view with cover images, progress bars, and match badges
+- **Detail modal** — click any card to see identifiers, sync state, and actions (View on Hardcover, Relink, Unlink)
+- **Filter & search** — filter by All/Matched/Unmatched, search by title, author, or series
+
+Cover images are downloaded from Hardcover and cached locally in `COVERS_DIR`.
+
+**Reverse proxy note:** The sync log uses Server-Sent Events (`/events`). If behind nginx, add `proxy_buffering off;` to the location block.
 
 ## CLI commands
 

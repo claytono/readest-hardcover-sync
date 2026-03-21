@@ -21,6 +21,8 @@ type Engine struct {
 	state       *state.State
 	matcher     *Matcher
 	logger      *slog.Logger
+	events      *EventBus // optional; nil disables event emission
+	coversDir   string    // directory for cached cover images; empty disables
 
 	mu              sync.Mutex // prevents concurrent Tick() calls
 	syncing         bool
@@ -32,11 +34,17 @@ type Engine struct {
 	statusNames      map[int]string // fetched from Hardcover on first sync
 }
 
+// EngineOptions holds optional dependencies for NewEngine.
+type EngineOptions struct {
+	Events    *EventBus
+	CoversDir string
+}
+
 // NewEngine constructs an Engine with the given dependencies.
 // If manualSync is true, the polling loop uses a dry-run updater (reads only),
 // and SyncNow() must be called to push changes to Hardcover.
 func NewEngine(readest ReadestPuller, finder BookFinder, updater ProgressUpdater,
-	st *state.State, matcher *Matcher, logger *slog.Logger, manualSync bool) *Engine {
+	st *state.State, matcher *Matcher, logger *slog.Logger, manualSync bool, opts *EngineOptions) *Engine {
 	e := &Engine{
 		readest:     readest,
 		finder:      finder,
@@ -45,6 +53,10 @@ func NewEngine(readest ReadestPuller, finder BookFinder, updater ProgressUpdater
 		state:       st,
 		matcher:     matcher,
 		logger:      logger,
+	}
+	if opts != nil {
+		e.events = opts.Events
+		e.coversDir = opts.CoversDir
 	}
 	if manualSync {
 		e.manualSync = true
@@ -151,6 +163,10 @@ func (e *Engine) Tick(ctx context.Context) error {
 		"matched", matchedCount,
 		"unmatched", unmatchedCount,
 	)
+	if e.events != nil {
+		e.events.ClearHistory()
+	}
+	e.emit(SyncEvent{Type: "sync_start", Detail: fmt.Sprintf("%d books in state", len(allBooks))})
 
 	// Step 2: Pull books since last sync.
 	books, err := e.readest.PullBooks(ctx, e.state.LastBookSync)
@@ -171,6 +187,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		_, exists := e.state.GetBook(book.BookHash)
 		if err := e.processBook(ctx, book); err != nil {
 			e.logger.Error("failed to process book", "book_hash", book.BookHash, "title", book.Title, "error", err)
+			e.emit(SyncEvent{Type: "error", Title: book.Title, Detail: err.Error()})
 		}
 		if exists {
 			updatedBooks++
@@ -196,6 +213,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		}
 		if err := e.processConfig(ctx, cfg); err != nil {
 			e.logger.Error("failed to process config", "book_hash", cfg.BookHash, "error", err)
+			e.emit(SyncEvent{Type: "error", Detail: err.Error()})
 		}
 	}
 
@@ -221,7 +239,45 @@ func (e *Engine) Tick(ctx context.Context) error {
 		}
 	}
 
-	// Step 5: Update state timestamps from max updated_at of returned records.
+	// Step 5: Download missing covers for matched books.
+	if e.coversDir != "" {
+		for _, bs := range e.state.ListBooks() {
+			if bs.HardcoverBookID == 0 || bs.HardcoverSlug == "" {
+				continue
+			}
+			if bs.CoverPath != "" && bs.Series != "" {
+				continue
+			}
+			// Look up the book to get the cover URL.
+			book, err := e.finder.FindBookBySlug(ctx, bs.HardcoverSlug)
+			if err != nil {
+				e.logger.Error("failed to look up book for cover", "slug", bs.HardcoverSlug, "error", err)
+				continue
+			}
+			if book == nil {
+				continue
+			}
+			changed := false
+			if bs.Series == "" && book.SeriesName() != "" {
+				bs.Series = book.SeriesName()
+				changed = true
+			}
+			if bs.CoverPath == "" && book.CoverURL() != "" {
+				coverPath, err := DownloadCover(e.coversDir, bs.BookHash, book.CoverURL())
+				if err != nil {
+					e.logger.Error("failed to download cover", "title", bs.Title, "error", err)
+				} else if coverPath != "" {
+					bs.CoverPath = coverPath
+					changed = true
+				}
+			}
+			if changed {
+				e.state.SetBook(bs.BookHash, bs)
+			}
+		}
+	}
+
+	// Step 6: Update state timestamps from max updated_at of returned records.
 	if maxBookUpdatedAt > e.state.LastBookSync {
 		e.state.LastBookSync = maxBookUpdatedAt
 	}
@@ -230,11 +286,23 @@ func (e *Engine) Tick(ctx context.Context) error {
 	}
 
 	// Step 6: Save state.
+	// Recount after processing.
+	allBooks = e.state.ListBooks()
+	matchedCount = 0
+	unmatchedCount = 0
+	for _, b := range allBooks {
+		if b.HardcoverBookID != 0 {
+			matchedCount++
+		} else {
+			unmatchedCount++
+		}
+	}
 	e.logger.Info("sync tick complete",
 		"new_books", newBooks,
 		"updated_books", updatedBooks,
 		"configs_processed", len(configs),
 	)
+	e.emit(SyncEvent{Type: "sync_complete", Detail: fmt.Sprintf("%d matched, %d unmatched", matchedCount, unmatchedCount)})
 	return e.state.Save()
 }
 
@@ -273,6 +341,7 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 	if result == nil {
 		bs.Unmatched = true
 		e.logger.Info("no match found for book", "title", book.Title, "author", book.Author)
+		e.emit(SyncEvent{Type: "book_unmatched", Title: book.Title})
 	} else {
 		bs.HardcoverBookID = result.BookID
 		bs.HardcoverSlug = result.Slug
@@ -280,7 +349,18 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 		bs.EditionPages = result.EditionPages
 		bs.ReadingFormatID = result.ReadingFormatID
 		bs.MatchMethod = result.MatchMethod
+		bs.Series = result.Series
 		e.logger.Info("matched book", "title", book.Title, "slug", result.Slug, "method", result.MatchMethod)
+		e.emit(SyncEvent{Type: "book_matched", Title: book.Title, Detail: "via " + result.MatchMethod})
+
+		// Download cover image if available.
+		if e.coversDir != "" && result.CoverURL != "" {
+			if coverPath, err := DownloadCover(e.coversDir, book.BookHash, result.CoverURL); err != nil {
+				e.logger.Error("failed to download cover", "title", book.Title, "error", err)
+			} else if coverPath != "" {
+				bs.CoverPath = coverPath
+			}
+		}
 	}
 
 	e.state.SetBook(book.BookHash, bs)
@@ -305,6 +385,11 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 
 	// Always store Readest progress so it's available when the book gets linked later.
 	bs.ReadestProgress = [2]int{current, total}
+
+	// Track activity time for sort ordering.
+	if ts := parseTimestamp(cfg.UpdatedAt); ts > bs.LastActivityAt {
+		bs.LastActivityAt = ts
+	}
 
 	// If not matched yet, save progress and stop — can't push to Hardcover.
 	if bs.HardcoverBookID == 0 {
@@ -413,6 +498,8 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 		bs.LastProgressSent = hardcoverPages
 	}
 
+	e.emit(SyncEvent{Type: "progress_synced", Title: bs.Title, Detail: fmt.Sprintf("%d%% → Hardcover", pct)})
+
 	bs.ReadestProgress = [2]int{current, total}
 	e.state.SetBook(cfg.BookHash, bs)
 	return nil
@@ -433,6 +520,12 @@ func parseTimestamp(s string) int64 {
 		}
 	}
 	return t.UnixMilli()
+}
+
+func (e *Engine) emit(evt SyncEvent) {
+	if e.events != nil {
+		e.events.Publish(evt)
+	}
 }
 
 func (e *Engine) statusName(id int) string {

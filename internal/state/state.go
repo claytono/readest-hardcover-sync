@@ -39,6 +39,13 @@ type BookState struct {
 	ReadestProgress [2]int `json:"readest_progress,omitempty"`
 	ReadestStatus   string `json:"readest_status,omitempty"`
 
+	// Display metadata
+	Series    string `json:"series,omitempty"`     // e.g., "Dungeon Crawler Carl #7"
+	CoverPath string `json:"cover_path,omitempty"` // local path to cached cover image
+
+	// Activity tracking for sort order
+	LastActivityAt int64 `json:"last_activity_at,omitempty"` // Unix ms from config UpdatedAt
+
 	Unmatched bool   `json:"unmatched,omitempty"`
 	LastError string `json:"last_error,omitempty"`
 

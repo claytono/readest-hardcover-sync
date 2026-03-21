@@ -6,7 +6,8 @@ const queryStatuses = `query Statuses { user_book_statuses { id status } }`
 
 const queryBookBySlug = `query FindBookBySlug($slug: String!) {
   books(where: { slug: { _eq: $slug } }, limit: 1) {
-    id title slug
+    id title slug cached_image
+    book_series { series { name } position }
     default_ebook_edition { id pages reading_format_id }
     default_physical_edition { id pages reading_format_id }
   }

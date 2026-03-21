@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -34,13 +36,17 @@ func (m *mockReadestPuller) PullConfigs(_ context.Context, _ int64) ([]readest.D
 }
 
 type mockBookFinder struct {
-	bySlug   map[string]*hardcover.Book
-	byISBN13 map[string]*hardcover.Edition
-	byISBN10 map[string]*hardcover.Edition
-	search   []hardcover.Book
+	bySlug    map[string]*hardcover.Book
+	bySlugErr error
+	byISBN13  map[string]*hardcover.Edition
+	byISBN10  map[string]*hardcover.Edition
+	search    []hardcover.Book
 }
 
 func (m *mockBookFinder) FindBookBySlug(_ context.Context, slug string) (*hardcover.Book, error) {
+	if m.bySlugErr != nil {
+		return nil, m.bySlugErr
+	}
 	if m.bySlug != nil {
 		return m.bySlug[slug], nil
 	}
@@ -95,6 +101,8 @@ type mockProgressUpdater struct {
 	meResponse *hardcover.MeResponse
 	meErr      error
 
+	statusesErr error
+
 	userBook   *hardcover.UserBook
 	getUserErr error
 
@@ -120,6 +128,9 @@ func (m *mockProgressUpdater) GetMe(_ context.Context) (*hardcover.MeResponse, e
 }
 
 func (m *mockProgressUpdater) GetStatuses(_ context.Context) ([]hardcover.BookStatus, error) {
+	if m.statusesErr != nil {
+		return nil, m.statusesErr
+	}
 	return []hardcover.BookStatus{
 		{ID: 1, Status: "Want to Read"},
 		{ID: 2, Status: "Currently Reading"},
@@ -202,7 +213,7 @@ func newTestEngine(t *testing.T, puller *mockReadestPuller, finder *mockBookFind
 	matcher := NewMatcher(finder, false)
 	logger := newNopLogger()
 
-	e := NewEngine(puller, finder, updater, st, matcher, logger, false)
+	e := NewEngine(puller, finder, updater, st, matcher, logger, false, nil)
 	return e, st
 }
 
@@ -693,7 +704,7 @@ func TestEngine_SyncNow(t *testing.T) {
 	matcher := NewMatcher(finder, false)
 	logger := newNopLogger()
 
-	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true)
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true, nil)
 
 	// In manual sync mode, engine.updater is the dry-run wrapper.
 	assert.NotEqual(t, realUpdater, engine.updater, "manual mode should use dry-run updater for polling")
@@ -726,7 +737,7 @@ func TestEngine_FullSync(t *testing.T) {
 	matcher := NewMatcher(finder, false)
 	logger := newNopLogger()
 
-	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true)
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true, nil)
 
 	err = engine.FullSync(context.Background())
 	require.NoError(t, err)
@@ -810,6 +821,47 @@ func TestEngine_ProcessConfig_UnmatchedStoresProgress(t *testing.T) {
 	assert.Empty(t, updater.insertUserBookCalls, "should not write to Hardcover for unmatched books")
 }
 
+// TestEngine_WithOptions verifies that NewEngine accepts EngineOptions.
+func TestEngine_WithOptions(t *testing.T) {
+	puller := &mockReadestPuller{books: []readest.DBBook{}, configs: []readest.DBBookConfig{}}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+
+	eb := NewEventBus(10)
+	engine := NewEngine(puller, finder, updater, st, NewMatcher(finder, false), newNopLogger(), false, &EngineOptions{
+		Events:    eb,
+		CoversDir: t.TempDir(),
+	})
+
+	err = engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	// Verify events were emitted.
+	ch := eb.Subscribe()
+	defer eb.Unsubscribe(ch)
+	// History should contain sync_start and sync_complete.
+	var events []SyncEvent
+	for {
+		select {
+		case e := <-ch:
+			events = append(events, e)
+		default:
+			goto done
+		}
+	}
+done:
+	require.GreaterOrEqual(t, len(events), 2)
+	assert.Equal(t, "sync_start", events[0].Type)
+	assert.Equal(t, "sync_complete", events[len(events)-1].Type)
+}
+
 // TestEngine_ManualSync_TickUsesDryRun: In manual mode, Tick uses dry-run (no real writes).
 func TestEngine_ManualSync_TickUsesDryRun(t *testing.T) {
 	isbn := "9781234567890"
@@ -854,7 +906,7 @@ func TestEngine_ManualSync_TickUsesDryRun(t *testing.T) {
 	matcher := NewMatcher(finder, false)
 	logger := newNopLogger()
 
-	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true)
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true, nil)
 
 	err = engine.Tick(context.Background())
 	require.NoError(t, err)
@@ -882,7 +934,7 @@ func TestEngine_ConcurrentTick_SecondReturnsNil(t *testing.T) {
 	st := state.New(f.Name())
 	matcher := NewMatcher(finder, false)
 	logger := newNopLogger()
-	engine := NewEngine(slowPuller, finder, updater, st, matcher, logger, false)
+	engine := NewEngine(slowPuller, finder, updater, st, matcher, logger, false, nil)
 
 	// Start first Tick in background — it will block on PullBooks.
 	firstDone := make(chan error, 1)
@@ -1135,6 +1187,345 @@ func TestEngine_GetMe_Error(t *testing.T) {
 	err := engine.Tick(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "auth failed")
+}
+
+// TestEngine_ProcessBook_DownloadsCover: When coversDir is set and a book matches with a cover URL,
+// the cover should be downloaded.
+func TestEngine_ProcessBook_DownloadsCover(t *testing.T) {
+	coverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake-cover"))
+	}))
+	defer coverSrv.Close()
+
+	pages := 300
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash:  "hashCover",
+				Title:     "Cover Book",
+				Author:    "Author C",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{
+		bySlug: map[string]*hardcover.Book{
+			"cover-book": {
+				ID:   100,
+				Slug: "cover-book",
+				CachedImage: &hardcover.CachedImage{
+					URL: coverSrv.URL + "/cover.jpg",
+				},
+				DefaultEbookEdition: &hardcover.Edition{
+					ID:    10,
+					Pages: &pages,
+				},
+			},
+		},
+	}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	coversDir := t.TempDir()
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.coversDir = coversDir
+
+	// Also set the metadata so identifier.Parse can extract slug.
+	meta := `{"identifier":"test","altIdentifier":[{"scheme":"HARDCOVER","value":"cover-book"}]}`
+	puller.books[0].Metadata = &meta
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	bs, ok := st.GetBook("hashCover")
+	require.True(t, ok)
+	assert.NotEmpty(t, bs.CoverPath, "cover should have been downloaded")
+}
+
+// TestEngine_BackfillCovers: Matched books without covers get them on next tick.
+func TestEngine_BackfillCovers(t *testing.T) {
+	coverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake-cover"))
+	}))
+	defer coverSrv.Close()
+
+	pages := 300
+	puller := &mockReadestPuller{books: []readest.DBBook{}, configs: []readest.DBBookConfig{}}
+	finder := &mockBookFinder{
+		bySlug: map[string]*hardcover.Book{
+			"backfill-book": {
+				ID:   200,
+				Slug: "backfill-book",
+				CachedImage: &hardcover.CachedImage{
+					URL: coverSrv.URL + "/cover.jpg",
+				},
+				BookSeries: []hardcover.BookSeriesEntry{
+					{Series: hardcover.SeriesInfo{Name: "Test Series"}, Position: 1},
+				},
+				DefaultEbookEdition: &hardcover.Edition{
+					ID:    20,
+					Pages: &pages,
+				},
+			},
+		},
+	}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	coversDir := t.TempDir()
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.coversDir = coversDir
+
+	// Pre-populate a matched book WITHOUT a cover.
+	st.SetBook("hashBackfill", state.BookState{
+		BookHash:        "hashBackfill",
+		Title:           "Backfill Book",
+		HardcoverBookID: 200,
+		HardcoverSlug:   "backfill-book",
+		LastStatusSent:  2,
+	})
+	// Also add an unmatched book and one that already has both cover and series — should be skipped.
+	st.SetBook("hashUnmatched", state.BookState{
+		BookHash:  "hashUnmatched",
+		Title:     "Unmatched",
+		Unmatched: true,
+	})
+	st.SetBook("hashComplete", state.BookState{
+		BookHash:        "hashComplete",
+		Title:           "Complete Book",
+		HardcoverBookID: 300,
+		HardcoverSlug:   "complete-book",
+		CoverPath:       "complete.jpg",
+		Series:          "Some Series",
+		LastStatusSent:  2,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	bs, ok := st.GetBook("hashBackfill")
+	require.True(t, ok)
+	assert.NotEmpty(t, bs.CoverPath, "cover should have been backfilled")
+}
+
+// TestEngine_BackfillCovers_NoCoverURL: Book without cover URL is skipped.
+func TestEngine_BackfillCovers_NoCoverURL(t *testing.T) {
+	puller := &mockReadestPuller{books: []readest.DBBook{}, configs: []readest.DBBookConfig{}}
+	finder := &mockBookFinder{
+		bySlug: map[string]*hardcover.Book{
+			"no-cover-slug": {
+				ID:   300,
+				Slug: "no-cover-slug",
+				// No CachedImage
+			},
+		},
+	}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.coversDir = t.TempDir()
+
+	st.SetBook("hashNoCover", state.BookState{
+		BookHash:        "hashNoCover",
+		Title:           "No Cover Book",
+		HardcoverBookID: 300,
+		HardcoverSlug:   "no-cover-slug",
+		LastStatusSent:  2,
+	})
+	// Book whose slug doesn't exist on Hardcover — FindBookBySlug returns nil.
+	st.SetBook("hashNotFound", state.BookState{
+		BookHash:        "hashNotFound",
+		Title:           "Not Found Book",
+		HardcoverBookID: 400,
+		HardcoverSlug:   "slug-not-in-finder",
+		LastStatusSent:  2,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	bs, ok := st.GetBook("hashNoCover")
+	require.True(t, ok)
+	assert.Empty(t, bs.CoverPath, "should not have a cover path")
+}
+
+// TestEngine_BackfillCovers_FinderError: Finder error is logged, not fatal.
+func TestEngine_BackfillCovers_FinderError(t *testing.T) {
+	puller := &mockReadestPuller{books: []readest.DBBook{}, configs: []readest.DBBookConfig{}}
+	finder := &mockBookFinder{bySlugErr: errors.New("lookup failed")}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.coversDir = t.TempDir()
+
+	st.SetBook("hashFE", state.BookState{
+		BookHash:        "hashFE",
+		Title:           "Finder Error Book",
+		HardcoverBookID: 400,
+		HardcoverSlug:   "finder-error",
+		LastStatusSent:  2,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err) // Should not fail
+}
+
+// TestEngine_BackfillCovers_DownloadError: Cover download fails gracefully.
+func TestEngine_BackfillCovers_DownloadError(t *testing.T) {
+	// Server that returns 500 for cover requests.
+	coverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer coverSrv.Close()
+
+	puller := &mockReadestPuller{books: []readest.DBBook{}, configs: []readest.DBBookConfig{}}
+	finder := &mockBookFinder{
+		bySlug: map[string]*hardcover.Book{
+			"dl-error-book": {
+				ID:   500,
+				Slug: "dl-error-book",
+				CachedImage: &hardcover.CachedImage{
+					URL: coverSrv.URL + "/cover.jpg",
+				},
+			},
+		},
+	}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.coversDir = t.TempDir()
+
+	st.SetBook("hashDLErr", state.BookState{
+		BookHash:        "hashDLErr",
+		Title:           "DL Error Book",
+		HardcoverBookID: 500,
+		HardcoverSlug:   "dl-error-book",
+		LastStatusSent:  2,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err) // Should not fail
+
+	bs, ok := st.GetBook("hashDLErr")
+	require.True(t, ok)
+	assert.Empty(t, bs.CoverPath, "should not have cover after download error")
+}
+
+// TestEngine_ProcessConfig_NothingChanged: Config with same progress as already sent — skipped.
+func TestEngine_ProcessConfig_NothingChanged(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashSame",
+				Progress:  "[200, 400]",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashSame", state.BookState{
+		BookHash:         "hashSame",
+		Title:            "Same Book",
+		HardcoverBookID:  100,
+		EditionID:        10,
+		EditionPages:     400,
+		LastStatusSent:   2,   // Already sent as "reading"
+		LastProgressSent: 200, // Already sent this progress
+		ReadestProgress:  [2]int{200, 400},
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	// No Hardcover writes should have happened.
+	assert.Empty(t, updater.insertUserBookCalls)
+	assert.Empty(t, updater.updateUserBookCalls)
+}
+
+// TestEngine_ProcessConfig_InvalidProgress: Malformed progress string — processConfig should error.
+func TestEngine_ProcessConfig_InvalidProgress(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashBadProg",
+				Progress:  "not-json",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashBadProg", state.BookState{
+		BookHash:        "hashBadProg",
+		Title:           "Bad Progress",
+		HardcoverBookID: 100,
+	})
+
+	// Tick should log error but not fail entirely.
+	err := engine.Tick(context.Background())
+	require.NoError(t, err) // Tick continues past individual config errors.
+}
+
+// TestEngine_ProcessConfig_BookNotInState: Config for unknown book is silently skipped.
+func TestEngine_ProcessConfig_BookNotInState(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashUnknown",
+				Progress:  "[10, 100]",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	// Don't add "hashUnknown" to state.
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+}
+
+// TestEngine_GetStatuses_Error: GetStatuses returns an error — Tick should propagate it.
+func TestEngine_GetStatuses_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse:  &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		statusesErr: errors.New("statuses unavailable"),
+	}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	err := engine.Tick(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "statuses unavailable")
 }
 
 // TestEngine_ProcessConfig_NoEditionPages: EditionPages == 0 — should update status

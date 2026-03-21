@@ -37,10 +37,18 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 
 ## Web UI
 
-- htmx-driven, served at `LISTEN_ADDR` (default `:8080`)
+- Single-page dark-themed layout with fixed sidebar and scrollable book card grid
+- htmx for partial updates, native `EventSource` for real-time sync log via SSE (`/events`)
 - Templates embedded via `//go:embed` in `internal/web/server.go` — changes require rebuild
-- Static files (`static/`) served from disk via `http.FileServer` — changes are live, but working directory matters
-- Link modal loads via htmx into a `<dialog>` element, opened with `.showModal()`
+- Static files (`static/`) and covers (`covers/`) served from disk via `http.FileServer`
+- Sidebar: sync status (auto-refreshes), Sync/Resync All buttons, live sync log
+- Book cards: cover images (cached locally from Hardcover), progress bars, match badges
+- Detail modal: click a card to see identifiers, sync state, and actions (View on Hardcover, Relink, Unlink)
+- Link modal: search Hardcover, opened from detail modal's Link/Relink button
+- Client-side filter tabs (All/Matched/Unmatched) and search (title, author, series)
+- Filter/search state persisted in URL hash
+- Mobile responsive: sidebar becomes slide-out drawer on narrow screens
+- SSE may require `proxy_buffering off` in nginx reverse proxy configs
 
 ## Environment / Config
 
@@ -48,6 +56,7 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 - Local dev: `.envrc` loads nix flake + sources `.envrc.local` via `dotenv_if_exists`
 - Credentials go in `.envrc.local` (gitignored)
 - State persisted in `state.json` (configurable via `STATE_FILE`)
+- Cover images cached in `covers/` directory (configurable via `COVERS_DIR`)
 
 ## Before every commit
 
@@ -61,6 +70,8 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 - **Polling, not webhooks** — Readest has no webhook support; the API was reverse-engineered. Polling every 10 minutes is the only option.
 - **Dry-run as decorator** — the `dryRunUpdater` wraps `ProgressUpdater` so engine code stays unchanged. Chosen over a flag on the engine to avoid scattering conditionals through mutation paths.
 - **One-direction sync** — Readest → Hardcover only. No reverse sync planned.
+- **Local cover cache** — covers downloaded from Hardcover at match time, served locally to avoid hotlinking their CDN. Backfilled on sync for existing books missing covers.
+- **EventBus for SSE** — `internal/sync/events.go` broadcasts structured sync events; SSE handler in `internal/web/handlers.go` streams them to the browser via `EventSource`.
 
 ## Key patterns
 

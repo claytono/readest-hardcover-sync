@@ -13,6 +13,7 @@ type Config struct {
 	SyncInterval     time.Duration
 	ListenAddr       string
 	StateFile        string
+	CoversDir        string
 	EnableTitleMatch bool
 	ManualSync       bool
 }
@@ -25,6 +26,7 @@ func Load() (*Config, error) {
 		SyncInterval:     10 * time.Minute,
 		ListenAddr:       ":8080",
 		StateFile:        "state.json",
+		CoversDir:        "covers",
 		EnableTitleMatch: os.Getenv("ENABLE_TITLE_MATCH") == "true",
 		ManualSync:       os.Getenv("MANUAL_SYNC") == "true",
 	}
@@ -41,6 +43,9 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("STATE_FILE"); v != "" {
 		cfg.StateFile = v
+	}
+	if v := os.Getenv("COVERS_DIR"); v != "" {
+		cfg.CoversDir = v
 	}
 
 	return cfg, nil

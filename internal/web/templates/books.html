@@ -3,79 +3,223 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Books – Readest–Hardcover Sync</title>
+  <title>Readest–Hardcover Sync</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
 </head>
 <body>
-  <header>
-    <nav><a href="/books">Books</a> | <a href="/status">Status</a></nav>
-    <h1>Readest–Hardcover Sync</h1>
-  </header>
-  <main>
-    <h2>Books</h2>
+  <!-- Mobile top bar -->
+  <div class="mobile-topbar">
+    <button class="menu-btn" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Menu">&#9776;</button>
+    <span class="mobile-title">Readest &rarr; Hardcover</span>
+  </div>
 
-    {{if .Matched}}
-    <h3>Matched ({{len .Matched}})</h3>
-    <table>
-      <thead>
-        <tr>
-          <th>Title</th>
-          <th>Author</th>
-          <th>Status</th>
-          <th>Progress</th>
-          <th>Match</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {{range .Matched}}
-        {{template "book_row.html" .}}
-        {{end}}
-      </tbody>
-    </table>
-    {{end}}
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <h1>Readest &rarr; Hardcover</h1>
+    </div>
 
-    {{if .Unmatched}}
-    <h3>Unmatched ({{len .Unmatched}})</h3>
-    <table>
-      <thead>
-        <tr>
-          <th>Title</th>
-          <th>Author</th>
-          <th>Status</th>
-          <th>Progress</th>
-          <th>Match</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {{range .Unmatched}}
-        {{template "book_row.html" .}}
-        {{end}}
-      </tbody>
-    </table>
-    {{end}}
+    {{template "sidebar_status" .Status}}
 
-    {{if and (eq (len .Matched) 0) (eq (len .Unmatched) 0)}}
-    <p>No books found. Sync will populate books from your Readest library.</p>
-    {{end}}
+    <div class="sidebar-section sync-actions">
+      <form hx-post="/sync" hx-target="#sidebar-status" hx-swap="outerHTML">
+        <button type="submit" class="btn btn-primary" id="sync-btn">Sync</button>
+      </form>
+      <div class="btn-hint">Pull latest progress and push to Hardcover</div>
+      <div class="spacer"></div>
+      <form hx-post="/full-sync" hx-target="#sidebar-status" hx-swap="outerHTML">
+        <button type="submit" class="btn btn-secondary" id="resync-btn"
+          hx-confirm="Re-pull all books and configs from Readest?">Resync All</button>
+      </form>
+      <div class="btn-hint">Re-pull all books and configs from scratch</div>
+      <div id="syncing-indicator" class="syncing-indicator" style="display:none">
+        <div class="spinner"></div>
+        <span>Syncing... <span id="sync-elapsed">0s</span></span>
+      </div>
+    </div>
 
-    <dialog id="link-modal"></dialog>
-  </main>
+    <div class="sync-log">
+      <div class="section-label">Sync Log</div>
+      <div id="sync-log-entries">
+      </div>
+    </div>
+  </aside>
+
+  <!-- Sidebar overlay for mobile (must be after sidebar for CSS sibling selector) -->
+  <div class="sidebar-overlay" onclick="document.querySelector('.sidebar').classList.remove('open')"></div>
+
+  <div class="main">
+    <div class="toolbar">
+      <div class="filter-tabs">
+        <button class="tab active" onclick="filterBooks('all', this)" data-filter="all">All ({{.TotalCount}})</button>
+        <button class="tab" onclick="filterBooks('matched', this)" data-filter="matched">Matched ({{.MatchedCount}})</button>
+        <button class="tab" onclick="filterBooks('unmatched', this)" data-filter="unmatched">Unmatched ({{.UnmatchedCount}})</button>
+      </div>
+      <input class="search-input" type="text" placeholder="Search books..." oninput="searchBooks(this.value)">
+    </div>
+
+    <div class="book-grid" id="book-grid">
+      {{range .Books}}
+      {{template "book_card.html" .}}
+      {{end}}
+      {{if eq .TotalCount 0}}
+      <div class="empty-state">No books found. Click Sync to pull books from your Readest library.</div>
+      {{end}}
+    </div>
+  </div>
+
+  <dialog id="link-modal"></dialog>
+  <dialog id="detail-modal"></dialog>
+
   <script>
-  var modal = document.getElementById('link-modal');
-  modal.addEventListener('click', function(e) {
-    if (e.target === this) this.close();
-  });
+  // Modal management
+  var linkModal = document.getElementById('link-modal');
+  var detailModal = document.getElementById('detail-modal');
+
+  linkModal.addEventListener('click', function(e) { if (e.target === this) this.close(); });
+  detailModal.addEventListener('click', function(e) { if (e.target === this) this.close(); });
+
   document.body.addEventListener('htmx:afterSwap', function(e) {
-    if (e.detail.target === modal) {
-      modal.showModal();
-    }
+    if (e.detail.target === linkModal) linkModal.showModal();
+    if (e.detail.target === detailModal) detailModal.showModal();
   });
   document.body.addEventListener('closeModal', function() {
-    modal.close();
+    linkModal.close();
+    detailModal.close();
   });
+
+  // Client-side filtering with URL hash persistence
+  var params = new URLSearchParams(location.hash.slice(1));
+  var currentFilter = params.get('filter') || 'all';
+  var currentSearch = params.get('q') || '';
+
+  function saveFilterState() {
+    var p = new URLSearchParams();
+    if (currentFilter !== 'all') p.set('filter', currentFilter);
+    if (currentSearch) p.set('q', currentSearch);
+    history.replaceState(null, '', p.toString() ? '#' + p.toString() : location.pathname);
+  }
+
+  function filterBooks(filter, btn) {
+    currentFilter = filter;
+    document.querySelectorAll('.filter-tabs .tab').forEach(function(t) { t.classList.remove('active'); });
+    btn.classList.add('active');
+    saveFilterState();
+    applyFilters();
+  }
+
+  function searchBooks(query) {
+    currentSearch = query.toLowerCase();
+    saveFilterState();
+    applyFilters();
+  }
+
+  // Restore state on load
+  (function() {
+    if (currentSearch) {
+      document.querySelector('.search-input').value = currentSearch;
+    }
+    if (currentFilter !== 'all') {
+      document.querySelectorAll('.filter-tabs .tab').forEach(function(t) {
+        t.classList.toggle('active', t.dataset.filter === currentFilter);
+      });
+    }
+    applyFilters();
+  })();
+
+  function applyFilters() {
+    document.querySelectorAll('.book-card').forEach(function(card) {
+      var matched = card.dataset.matched === 'true';
+      var title = (card.dataset.title || '').toLowerCase();
+      var author = (card.dataset.author || '').toLowerCase();
+      var series = (card.dataset.series || '').toLowerCase();
+
+      var showByFilter = currentFilter === 'all' ||
+        (currentFilter === 'matched' && matched) ||
+        (currentFilter === 'unmatched' && !matched);
+      var showBySearch = !currentSearch ||
+        title.indexOf(currentSearch) !== -1 ||
+        author.indexOf(currentSearch) !== -1 ||
+        series.indexOf(currentSearch) !== -1;
+
+      card.style.display = (showByFilter && showBySearch) ? '' : 'none';
+    });
+  }
+
+  // SSE sync log via EventSource
+  var evtSource = new EventSource('/events');
+  evtSource.onmessage = function(e) {
+    try {
+      var evt = JSON.parse(e.data);
+      var container = document.getElementById('sync-log-entries');
+      var entry = document.createElement('div');
+      entry.className = 'log-entry';
+
+      function logIcon(icon, cls) {
+        var s = document.createElement('span');
+        s.className = cls;
+        s.textContent = icon;
+        return s;
+      }
+      switch(evt.type) {
+        case 'sync_start':
+          entry.appendChild(logIcon('\u2014', 'icon-dim'));
+          entry.appendChild(document.createTextNode(' Sync started'));
+          break;
+        case 'book_matched':
+          entry.appendChild(logIcon('\u2713', 'icon-ok'));
+          entry.appendChild(document.createTextNode(' Matched \u201c' + (evt.title || '') + '\u201d ' + (evt.detail || '')));
+          break;
+        case 'book_unmatched':
+          entry.appendChild(logIcon('\u26a0', 'icon-warn'));
+          entry.appendChild(document.createTextNode(' No match for \u201c' + (evt.title || '') + '\u201d'));
+          break;
+        case 'progress_synced':
+          entry.appendChild(logIcon('\u2713', 'icon-ok'));
+          entry.appendChild(document.createTextNode(' Synced \u201c' + (evt.title || '') + '\u201d ' + (evt.detail || '')));
+          break;
+        case 'sync_complete':
+          entry.className = 'log-separator';
+          entry.textContent = '\u2014\u2014 sync complete: ' + (evt.detail || '') + ' \u2014\u2014';
+          break;
+        case 'error':
+          entry.appendChild(logIcon('\u2717', 'icon-err'));
+          entry.appendChild(document.createTextNode(' Error: ' + (evt.title ? evt.title + ': ' : '') + (evt.detail || '')));
+          break;
+        default:
+          entry.textContent = JSON.stringify(evt);
+      }
+
+      container.prepend(entry);
+
+      // Cap log at 100 entries.
+      while (container.children.length > 100) {
+        container.removeChild(container.lastChild);
+      }
+
+      // Disable/enable sync buttons and show spinner
+      var syncBtn = document.getElementById('sync-btn');
+      var resyncBtn = document.getElementById('resync-btn');
+      var indicator = document.getElementById('syncing-indicator');
+      var elapsedEl = document.getElementById('sync-elapsed');
+      if (evt.type === 'sync_start') {
+        if (syncBtn) { syncBtn.disabled = true; syncBtn.classList.add('syncing'); }
+        if (resyncBtn) { resyncBtn.disabled = true; resyncBtn.classList.add('syncing'); }
+        if (indicator) { indicator.style.display = ''; }
+        window._syncStart = Date.now();
+        window._syncTimer = setInterval(function() {
+          if (elapsedEl) elapsedEl.textContent = Math.round((Date.now() - window._syncStart) / 1000) + 's';
+        }, 1000);
+      } else if (evt.type === 'sync_complete') {
+        if (syncBtn) { syncBtn.disabled = false; syncBtn.classList.remove('syncing'); }
+        if (resyncBtn) { resyncBtn.disabled = false; resyncBtn.classList.remove('syncing'); }
+        if (indicator) { indicator.style.display = 'none'; }
+        if (window._syncTimer) { clearInterval(window._syncTimer); window._syncTimer = null; }
+      }
+    } catch(err) {
+      // Ignore parse errors from SSE
+    }
+  };
   </script>
 </body>
 </html>

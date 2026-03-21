@@ -18,11 +18,13 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("STATE_FILE", "")
 	t.Setenv("ENABLE_TITLE_MATCH", "")
 	t.Setenv("MANUAL_SYNC", "")
+	t.Setenv("COVERS_DIR", "")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
 	assert.Equal(t, ":8080", cfg.ListenAddr)
 	assert.Equal(t, "state.json", cfg.StateFile)
+	assert.Equal(t, "covers", cfg.CoversDir)
 	assert.False(t, cfg.EnableTitleMatch)
 	assert.False(t, cfg.ManualSync)
 }
@@ -36,10 +38,12 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	t.Setenv("STATE_FILE", "/tmp/s.json")
 	t.Setenv("ENABLE_TITLE_MATCH", "true")
 	t.Setenv("MANUAL_SYNC", "true")
+	t.Setenv("COVERS_DIR", "/tmp/covers")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
 	assert.Equal(t, "a@b.com", cfg.ReadestEmail)
+	assert.Equal(t, "/tmp/covers", cfg.CoversDir)
 	assert.Equal(t, "pass", cfg.ReadestPassword)
 	assert.Equal(t, "tok", cfg.HardcoverToken)
 	assert.Equal(t, ":9090", cfg.ListenAddr)
@@ -57,6 +61,7 @@ func TestLoad_InvalidSyncInterval(t *testing.T) {
 	t.Setenv("STATE_FILE", "")
 	t.Setenv("ENABLE_TITLE_MATCH", "")
 	t.Setenv("MANUAL_SYNC", "")
+	t.Setenv("COVERS_DIR", "")
 
 	_, err := config.Load()
 	require.Error(t, err)

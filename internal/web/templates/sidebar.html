@@ -1,0 +1,20 @@
+{{define "sidebar_status"}}
+<div id="sidebar-status" class="sidebar-section"
+     hx-get="/sidebar-status"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML">
+  <div class="section-label">Sync Status</div>
+  <div class="stat-row">
+    <span class="label">Last sync</span>
+    <span class="value-time">{{.LastSync}}</span>
+  </div>
+  <div class="stat-row">
+    <span class="label">Matched</span>
+    <span class="value-success">{{.MatchedCount}} book{{if ne .MatchedCount 1}}s{{end}}</span>
+  </div>
+  <div class="stat-row">
+    <span class="label">Unmatched</span>
+    <span class="value-warning">{{.UnmatchedCount}} book{{if ne .UnmatchedCount 1}}s{{end}}</span>
+  </div>
+</div>
+{{end}}
