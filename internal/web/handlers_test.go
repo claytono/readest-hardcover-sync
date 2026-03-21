@@ -626,19 +626,24 @@ func TestHandleUnlink_NotFound(t *testing.T) {
 	}
 }
 
-// TestHandleUnlink_Success verifies that a linked book becomes unlinked.
+// TestHandleUnlink_Success verifies that a linked book becomes unlinked and all
+// Hardcover-related fields are cleared.
 func TestHandleUnlink_Success(t *testing.T) {
 	st := makeState(t)
 	st.SetBook("linked1", state.BookState{
-		BookHash:        "linked1",
-		Title:           "Linked Book",
-		Author:          "Author X",
-		HardcoverBookID: 777,
-		HardcoverSlug:   "linked-book",
-		EditionID:       999,
-		EditionPages:    300,
-		MatchMethod:     "isbn13",
-		UserBookID:      42,
+		BookHash:         "linked1",
+		Title:            "Linked Book",
+		Author:           "Author X",
+		HardcoverBookID:  777,
+		HardcoverSlug:    "linked-book",
+		EditionID:        999,
+		EditionPages:     300,
+		ReadingFormatID:  1,
+		MatchMethod:      "isbn13",
+		UserBookID:       42,
+		UserBookReadID:   55,
+		LastStatusSent:   2,
+		LastProgressSent: 150,
 	})
 	h := newTestHandlers(st)
 
@@ -670,6 +675,26 @@ func TestHandleUnlink_Success(t *testing.T) {
 	if !book.Unmatched {
 		t.Errorf("expected Unmatched=true after unlink")
 	}
+	// Verify newly-cleared fields.
+	if book.UserBookReadID != 0 {
+		t.Errorf("expected UserBookReadID=0 after unlink, got %d", book.UserBookReadID)
+	}
+	if book.LastStatusSent != 0 {
+		t.Errorf("expected LastStatusSent=0 after unlink, got %d", book.LastStatusSent)
+	}
+	if book.LastProgressSent != 0 {
+		t.Errorf("expected LastProgressSent=0 after unlink, got %d", book.LastProgressSent)
+	}
+	if book.ReadingFormatID != 0 {
+		t.Errorf("expected ReadingFormatID=0 after unlink, got %d", book.ReadingFormatID)
+	}
+	// Preserved fields.
+	if book.Title != "Linked Book" {
+		t.Errorf("expected Title preserved, got %q", book.Title)
+	}
+	if book.Author != "Author X" {
+		t.Errorf("expected Author preserved, got %q", book.Author)
+	}
 }
 
 // TestHandleSidebarStatus_Empty verifies the sidebar status renders with zero counts.
@@ -698,8 +723,8 @@ func TestHandleSidebarStatus_WithBooks(t *testing.T) {
 	st.SetBook("u1", state.BookState{BookHash: "u1", Title: "Unmatched One", Unmatched: true})
 
 	// Set non-zero sync timestamps.
-	st.LastBookSync = time.Now().UnixMilli()
-	st.LastConfigSync = time.Now().UnixMilli()
+	st.SetLastBookSync(time.Now().UnixMilli())
+	st.SetLastConfigSync(time.Now().UnixMilli())
 
 	h := newTestHandlers(st)
 
@@ -1562,7 +1587,7 @@ func TestHandleSidebarStatus_RelativeTime(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			st := makeState(t)
-			st.LastBookSync = time.Now().Add(-tc.ago).UnixMilli()
+			st.SetLastBookSync(time.Now().Add(-tc.ago).UnixMilli())
 			h := newTestHandlers(st)
 
 			req := httptest.NewRequest(http.MethodGet, "/sidebar-status", nil)

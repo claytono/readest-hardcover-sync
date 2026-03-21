@@ -732,8 +732,8 @@ func TestEngine_FullSync(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 	st := state.New(f.Name())
-	st.LastBookSync = 999
-	st.LastConfigSync = 888
+	st.SetLastBookSync(999)
+	st.SetLastConfigSync(888)
 	matcher := NewMatcher(finder, false)
 	logger := newNopLogger()
 
@@ -743,8 +743,8 @@ func TestEngine_FullSync(t *testing.T) {
 	require.NoError(t, err)
 
 	// Timestamps should have been reset (and remain 0 since puller returns no records).
-	assert.Equal(t, int64(0), st.LastBookSync)
-	assert.Equal(t, int64(0), st.LastConfigSync)
+	assert.Equal(t, int64(0), st.GetLastBookSync())
+	assert.Equal(t, int64(0), st.GetLastConfigSync())
 }
 
 // TestEngine_PendingProgressSync verifies that matched books with stored progress
@@ -1739,9 +1739,9 @@ func TestEngine_TimestampFromRecords(t *testing.T) {
 
 	// LastBookSync should be the ms timestamp of ts2.
 	expectedMs := parseTimestamp(ts2)
-	assert.Equal(t, expectedMs, st.LastBookSync)
+	assert.Equal(t, expectedMs, st.GetLastBookSync())
 
 	// Should NOT be zero and should NOT be wall clock (much larger value).
-	assert.Greater(t, st.LastBookSync, int64(0))
-	assert.Less(t, st.LastBookSync, int64(2000000000000)) // not a wall clock time from ~2033+
+	assert.Greater(t, st.GetLastBookSync(), int64(0))
+	assert.Less(t, st.GetLastBookSync(), int64(2000000000000)) // not a wall clock time from ~2033+
 }

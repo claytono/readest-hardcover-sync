@@ -6,12 +6,19 @@ import (
 	"sync"
 )
 
-type State struct {
-	mu             sync.RWMutex         `json:"-"`
-	path           string               `json:"-"`
+// diskState is the JSON-serializable representation of State.
+type diskState struct {
 	LastBookSync   int64                `json:"last_book_sync"`
 	LastConfigSync int64                `json:"last_config_sync"`
 	Books          map[string]BookState `json:"books"`
+}
+
+type State struct {
+	mu             sync.RWMutex
+	path           string
+	lastBookSync   int64
+	lastConfigSync int64
+	Books          map[string]BookState
 }
 
 type BookState struct {
@@ -57,6 +64,37 @@ func New(path string) *State {
 	return &State{path: path, Books: make(map[string]BookState)}
 }
 
+func (s *State) GetLastBookSync() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastBookSync
+}
+
+func (s *State) SetLastBookSync(ts int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastBookSync = ts
+}
+
+func (s *State) GetLastConfigSync() int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastConfigSync
+}
+
+func (s *State) SetLastConfigSync(ts int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastConfigSync = ts
+}
+
+func (s *State) ResetSyncTimestamps() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastBookSync = 0
+	s.lastConfigSync = 0
+}
+
 func (s *State) Load() error {
 	data, err := os.ReadFile(s.path)
 	if err != nil {
@@ -66,10 +104,16 @@ func (s *State) Load() error {
 		return err
 	}
 
-	if err := json.Unmarshal(data, s); err != nil {
+	var ds diskState
+	if err := json.Unmarshal(data, &ds); err != nil {
 		return err
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastBookSync = ds.LastBookSync
+	s.lastConfigSync = ds.LastConfigSync
+	s.Books = ds.Books
 	if s.Books == nil {
 		s.Books = make(map[string]BookState)
 	}
@@ -78,7 +122,14 @@ func (s *State) Load() error {
 }
 
 func (s *State) Save() error {
-	data, err := json.MarshalIndent(s, "", "  ")
+	s.mu.RLock()
+	ds := diskState{
+		LastBookSync:   s.lastBookSync,
+		LastConfigSync: s.lastConfigSync,
+		Books:          s.Books,
+	}
+	data, err := json.MarshalIndent(ds, "", "  ")
+	s.mu.RUnlock()
 	if err != nil {
 		return err
 	}
@@ -89,6 +140,20 @@ func (s *State) Save() error {
 	}
 
 	return os.Rename(tmpPath, s.path)
+}
+
+// UpdateBook acquires the lock, fetches the book, calls fn with a pointer to
+// the book, and writes it back. Returns false if the book doesn't exist.
+func (s *State) UpdateBook(hash string, fn func(*BookState)) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.Books[hash]
+	if !ok {
+		return false
+	}
+	fn(&b)
+	s.Books[hash] = b
+	return true
 }
 
 func (s *State) GetBook(hash string) (BookState, bool) {

@@ -19,8 +19,8 @@ func TestState_LoadNonexistent(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, s.Books)
 	assert.Empty(t, s.Books)
-	assert.Equal(t, int64(0), s.LastBookSync)
-	assert.Equal(t, int64(0), s.LastConfigSync)
+	assert.Equal(t, int64(0), s.GetLastBookSync())
+	assert.Equal(t, int64(0), s.GetLastConfigSync())
 }
 
 func TestState_SaveAndReload(t *testing.T) {
@@ -28,8 +28,8 @@ func TestState_SaveAndReload(t *testing.T) {
 	path := filepath.Join(dir, "state.json")
 
 	s := New(path)
-	s.LastBookSync = 1234567890
-	s.LastConfigSync = 9876543210
+	s.SetLastBookSync(1234567890)
+	s.SetLastConfigSync(9876543210)
 	s.SetBook("hash1", BookState{
 		BookHash:         "hash1",
 		Title:            "Test Book",
@@ -64,8 +64,8 @@ func TestState_SaveAndReload(t *testing.T) {
 	err = s2.Load()
 	require.NoError(t, err)
 
-	assert.Equal(t, int64(1234567890), s2.LastBookSync)
-	assert.Equal(t, int64(9876543210), s2.LastConfigSync)
+	assert.Equal(t, int64(1234567890), s2.GetLastBookSync())
+	assert.Equal(t, int64(9876543210), s2.GetLastConfigSync())
 
 	b1, ok := s2.GetBook("hash1")
 	require.True(t, ok)
@@ -250,4 +250,71 @@ func TestState_Save_WriteError(t *testing.T) {
 
 	err := s.Save()
 	require.Error(t, err)
+}
+
+func TestState_UpdateBook(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	s := New(path)
+
+	s.SetBook("h1", BookState{BookHash: "h1", Title: "Original", Author: "Author"})
+
+	// Mutation succeeds for existing book.
+	ok := s.UpdateBook("h1", func(b *BookState) {
+		b.Title = "Updated"
+	})
+	require.True(t, ok)
+
+	got, _ := s.GetBook("h1")
+	assert.Equal(t, "Updated", got.Title)
+	assert.Equal(t, "Author", got.Author) // other fields preserved
+
+	// Returns false for missing book.
+	ok = s.UpdateBook("missing", func(b *BookState) {
+		b.Title = "nope"
+	})
+	assert.False(t, ok)
+}
+
+func TestState_SaveLoadRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s := New(path)
+	s.SetLastBookSync(111)
+	s.SetLastConfigSync(222)
+	s.SetBook("h1", BookState{BookHash: "h1", Title: "Book One"})
+
+	require.NoError(t, s.Save())
+
+	// Verify the JSON file contains the expected keys for backward compatibility.
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	json := string(data)
+	assert.Contains(t, json, `"last_book_sync"`)
+	assert.Contains(t, json, `"last_config_sync"`)
+	assert.Contains(t, json, `"books"`)
+
+	// Load into a fresh state.
+	s2 := New(path)
+	require.NoError(t, s2.Load())
+	assert.Equal(t, int64(111), s2.GetLastBookSync())
+	assert.Equal(t, int64(222), s2.GetLastConfigSync())
+	b, ok := s2.GetBook("h1")
+	require.True(t, ok)
+	assert.Equal(t, "Book One", b.Title)
+}
+
+func TestState_ResetSyncTimestamps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s := New(path)
+	s.SetLastBookSync(100)
+	s.SetLastConfigSync(200)
+
+	s.ResetSyncTimestamps()
+
+	assert.Equal(t, int64(0), s.GetLastBookSync())
+	assert.Equal(t, int64(0), s.GetLastConfigSync())
 }

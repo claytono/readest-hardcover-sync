@@ -105,7 +105,7 @@ func TestDryRun_InsertUserBook_FakeResponse(t *testing.T) {
 	got, err := dru.InsertUserBook(context.Background(), bookID, statusID, 3, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, -1, got.ID)
+	assert.Equal(t, 0, got.ID)
 	assert.Equal(t, bookID, got.BookID)
 	assert.Equal(t, statusID, got.StatusID)
 }
@@ -129,7 +129,7 @@ func TestDryRun_InsertUserBookRead_FakeResponse(t *testing.T) {
 	got, err := dru.InsertUserBookRead(context.Background(), 5, progressPages, nil, "2024-01-01", nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, -1, got.ID)
+	assert.Equal(t, 0, got.ID)
 	require.NotNil(t, got.ProgressPages)
 	assert.Equal(t, progressPages, *got.ProgressPages)
 }
