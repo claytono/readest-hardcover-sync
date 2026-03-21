@@ -1,0 +1,79 @@
+{{define "book_detail.html"}}
+<div class="modal-content detail-modal-content">
+  <div class="detail-layout">
+    <div class="detail-cover">
+      {{if .CoverURL}}
+      <img src="{{.CoverURL}}" alt="{{.Book.Title}}">
+      {{else}}
+      <div class="cover-placeholder detail-cover-placeholder"><span class="icon">&#128214;</span></div>
+      {{end}}
+    </div>
+    <div class="detail-right">
+      <h2>{{.Book.Title}}</h2>
+      <div class="detail-author">{{if .Book.Author}}{{.Book.Author}}{{else}}&mdash;{{end}}</div>
+
+      {{if .Book.HardcoverBookID}}
+      <div class="detail-match">
+        <span class="match-badge">&#9679; {{.Book.MatchMethod}}</span>
+        <a href="https://hardcover.app/books/{{.Book.HardcoverSlug}}" target="_blank" rel="noopener noreferrer" class="detail-link">{{.Book.HardcoverSlug}}</a>
+      </div>
+      {{end}}
+
+      <div class="detail-grid">
+        {{if .Identifiers}}
+        <div class="detail-section">
+          <div class="section-label">Identifiers</div>
+          <div class="identifier-tags">
+            {{range .Identifiers.HardcoverSlugs}}<span class="id-tag id-tag-hardcover">hardcover: {{.}}</span>{{end}}
+            {{range .Identifiers.ISBN13s}}<span class="id-tag id-tag-isbn">ISBN-13: {{.}}</span>{{end}}
+            {{range .Identifiers.ISBN10s}}<span class="id-tag id-tag-isbn">ISBN-10: {{.}}</span>{{end}}
+            {{range .Identifiers.ASINs}}<span class="id-tag id-tag-asin">ASIN: {{.}}</span>{{end}}
+          </div>
+        </div>
+        {{end}}
+
+        <div class="detail-section">
+          <div class="section-label">Reading Progress</div>
+          <dl class="detail-fields">
+            {{if .Book.ReadestStatus}}<dt>Status</dt><dd>{{.Book.ReadestStatus}}</dd>{{end}}
+            <dt>Progress</dt><dd>{{index .Book.ReadestProgress 0}}/{{index .Book.ReadestProgress 1}} pages</dd>
+            {{if .Book.EditionPages}}<dt>Edition</dt><dd>{{.Book.EditionPages}} pages</dd>{{end}}
+          </dl>
+        </div>
+
+        {{if .Book.HardcoverBookID}}
+        <div class="detail-section">
+          <div class="section-label">Hardcover Sync</div>
+          <dl class="detail-fields">
+            <dt>Status sent</dt><dd>{{if .LastStatusName}}{{.LastStatusName}}{{else}}&mdash;{{end}}</dd>
+            <dt>Progress sent</dt><dd>{{if .Book.LastProgressSent}}{{.Book.LastProgressSent}} pages{{else}}&mdash;{{end}}</dd>
+          </dl>
+        </div>
+        {{end}}
+      </div>
+    </div>
+  </div>
+
+  <div class="detail-actions">
+    {{if .Book.HardcoverBookID}}
+    <a href="https://hardcover.app/books/{{.Book.HardcoverSlug}}" target="_blank" rel="noopener noreferrer" class="btn btn-primary">View on Hardcover</a>
+    <button class="btn btn-secondary"
+      hx-get="/books/{{.Book.BookHash}}/link-modal"
+      hx-target="#link-modal"
+      onclick="document.getElementById('detail-modal').close()">Relink</button>
+    <button class="btn btn-danger"
+      hx-post="/books/{{.Book.BookHash}}/unlink"
+      hx-target="#book-{{.Book.BookHash}}"
+      hx-swap="outerHTML"
+      hx-confirm="Unlink this book from Hardcover?"
+      onclick="document.getElementById('detail-modal').close()">Unlink</button>
+    {{else}}
+    <button class="btn btn-primary"
+      hx-get="/books/{{.Book.BookHash}}/link-modal"
+      hx-target="#link-modal"
+      onclick="document.getElementById('detail-modal').close()">Link to Hardcover</button>
+    {{end}}
+    <button class="btn btn-secondary" onclick="document.getElementById('detail-modal').close()">Close</button>
+  </div>
+</div>
+{{end}}

@@ -1,5 +1,6 @@
 .envrc.local
 state.json
+covers/
 .git
 .go/
 .direnv/

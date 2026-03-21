@@ -16,6 +16,8 @@ type MatchResult struct {
 	EditionPages    int
 	ReadingFormatID int
 	MatchMethod     string // "slug", "isbn13", "isbn10", "title", "manual"
+	CoverURL        string // from Hardcover's cached_image
+	Series          string // e.g., "Dungeon Crawler Carl #3"
 }
 
 // Matcher resolves a ParsedIdentifiers set to a Hardcover book/edition.
@@ -51,6 +53,8 @@ func (m *Matcher) Match(ctx context.Context, ids identifier.ParsedIdentifiers) (
 		result := &MatchResult{
 			BookID:      book.ID,
 			Slug:        book.Slug,
+			CoverURL:    book.CoverURL(),
+			Series:      book.SeriesName(),
 			MatchMethod: "slug",
 		}
 		if ed != nil {
@@ -105,6 +109,8 @@ func (m *Matcher) Match(ctx context.Context, ids identifier.ParsedIdentifiers) (
 			result := &MatchResult{
 				BookID:      book.ID,
 				Slug:        book.Slug,
+				CoverURL:    book.CoverURL(),
+				Series:      book.SeriesName(),
 				MatchMethod: "title",
 			}
 			ed := book.DefaultPhysicalEdition
@@ -136,6 +142,8 @@ func editionToResult(ed *hardcover.Edition, method string) *MatchResult {
 	}
 	if ed.Book != nil {
 		result.Slug = ed.Book.Slug
+		result.CoverURL = ed.Book.CoverURL()
+		result.Series = ed.Book.SeriesName()
 	}
 	if ed.Pages != nil {
 		result.EditionPages = *ed.Pages

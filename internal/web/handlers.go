@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -22,13 +23,16 @@ type handlers struct {
 	finder      syncsvc.BookFinder
 	updater     syncsvc.ProgressUpdater
 	engine      *syncsvc.Engine
+	events      *syncsvc.EventBus
+	ctx         context.Context // app lifecycle context for background work
+	coversDir   string
 	tmpl        *template.Template
 	statusNames map[int]string
 	logger      *slog.Logger
 }
 
 func (h *handlers) loadTemplates() {
-	h.tmpl = template.Must(template.ParseFS(templateFS, "templates/*.html"))
+	h.tmpl = template.Must(template.New("").ParseFS(templateFS, "templates/*.html"))
 }
 
 // handleRoot redirects to /books.
@@ -36,31 +40,76 @@ func (h *handlers) handleRoot(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/books", http.StatusFound)
 }
 
-type booksData struct {
-	Matched   []state.BookState
-	Unmatched []state.BookState
+// bookCardData extends BookState with computed fields for the card template.
+type bookCardData struct {
+	state.BookState
+	ProgressPct int
+	IsFinished  bool
+	CoverURL    string // /covers/{file} or empty
 }
 
-// handleBooks renders the book list from state, sorted by title.
-func (h *handlers) handleBooks(w http.ResponseWriter, r *http.Request) {
+type booksPageData struct {
+	Books          []bookCardData
+	Status         sidebarStatusData
+	MatchedCount   int
+	UnmatchedCount int
+	TotalCount     int
+}
+
+func (h *handlers) buildBookCards() []bookCardData {
 	all := h.state.ListBooks()
 
+	// Sort by LastActivityAt descending, then alphabetically.
 	sort.Slice(all, func(i, j int) bool {
+		if all[i].LastActivityAt != all[j].LastActivityAt {
+			return all[i].LastActivityAt > all[j].LastActivityAt
+		}
 		return strings.ToLower(all[i].Title) < strings.ToLower(all[j].Title)
 	})
 
-	var matched, unmatched []state.BookState
-	for _, b := range all {
-		if b.HardcoverBookID != 0 {
-			matched = append(matched, b)
+	cards := make([]bookCardData, len(all))
+	for i, b := range all {
+		pct := 0
+		if b.ReadestProgress[1] > 0 {
+			pct = b.ReadestProgress[0] * 100 / b.ReadestProgress[1]
+		}
+		finished := b.ReadestStatus == "finished" ||
+			(b.ReadestProgress[1] > 0 && b.ReadestProgress[0] >= b.ReadestProgress[1])
+
+		coverURL := ""
+		if b.CoverPath != "" {
+			coverURL = "/covers/" + b.CoverPath
+		}
+
+		cards[i] = bookCardData{
+			BookState:   b,
+			ProgressPct: pct,
+			IsFinished:  finished,
+			CoverURL:    coverURL,
+		}
+	}
+	return cards
+}
+
+// handleBooks renders the main single-page layout.
+func (h *handlers) handleBooks(w http.ResponseWriter, r *http.Request) {
+	cards := h.buildBookCards()
+
+	var matched, unmatched int
+	for _, c := range cards {
+		if c.HardcoverBookID != 0 {
+			matched++
 		} else {
-			unmatched = append(unmatched, b)
+			unmatched++
 		}
 	}
 
-	data := booksData{
-		Matched:   matched,
-		Unmatched: unmatched,
+	data := booksPageData{
+		Books:          cards,
+		Status:         h.buildSidebarStatus(),
+		MatchedCount:   matched,
+		UnmatchedCount: unmatched,
+		TotalCount:     len(cards),
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -69,10 +118,63 @@ func (h *handlers) handleBooks(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleBookDetail returns the detail modal content for a book.
+func (h *handlers) handleBookDetail(w http.ResponseWriter, r *http.Request) {
+	hash := r.PathValue("hash")
+
+	book, ok := h.state.GetBook(hash)
+	if !ok {
+		http.Error(w, "book not found", http.StatusNotFound)
+		return
+	}
+
+	var ids *identifier.ParsedIdentifiers
+	if book.Metadata != nil {
+		parsed := identifier.Parse(book.Metadata, book.Title, book.Author)
+		// Only set ids if there are actual identifiers to show.
+		if len(parsed.HardcoverSlugs) > 0 || len(parsed.ISBN13s) > 0 || len(parsed.ISBN10s) > 0 || len(parsed.ASINs) > 0 {
+			ids = &parsed
+		}
+	}
+
+	// Resolve status ID to name.
+	lastStatusName := ""
+	if book.LastStatusSent != 0 {
+		if name, ok := h.statusNames[book.LastStatusSent]; ok {
+			lastStatusName = name
+		}
+	}
+
+	type detailData struct {
+		Book           state.BookState
+		Identifiers    *identifier.ParsedIdentifiers
+		CoverURL       string
+		LastStatusName string
+	}
+
+	coverURL := ""
+	if book.CoverPath != "" {
+		coverURL = "/covers/" + book.CoverPath
+	}
+
+	data := detailData{
+		Book:           book,
+		Identifiers:    ids,
+		CoverURL:       coverURL,
+		LastStatusName: lastStatusName,
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.tmpl.ExecuteTemplate(w, "book_detail.html", data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
 type linkModalData struct {
 	Book        state.BookState
 	Series      string
 	Identifiers *identifier.ParsedIdentifiers
+	CoverURL    string
 }
 
 // handleLinkModal returns the link modal partial for the given book hash.
@@ -100,10 +202,16 @@ func (h *handlers) handleLinkModal(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	coverURL := ""
+	if book.CoverPath != "" {
+		coverURL = "/covers/" + book.CoverPath
+	}
+
 	data := linkModalData{
 		Book:        book,
 		Series:      series,
 		Identifiers: ids,
+		CoverURL:    coverURL,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -309,6 +417,24 @@ func (h *handlers) handleLink(w http.ResponseWriter, r *http.Request) {
 		h.logger.Info("linking book", "title", b.Title, "author", b.Author, "hash", hash, "slug", slug, "book_id", bookID, "edition_id", editionID)
 	}
 	h.state.SetManualLink(hash, bookID, slug, editionID, editionPages)
+
+	// Download cover image by looking up the book server-side.
+	if h.coversDir != "" && slug != "" {
+		if book, err := h.finder.FindBookBySlug(r.Context(), slug); err != nil {
+			h.logger.Error("failed to look up book for cover", "slug", slug, "error", err)
+		} else if book != nil && book.CoverURL() != "" {
+			if coverPath, err := syncsvc.DownloadCover(h.coversDir, hash, book.CoverURL()); err != nil {
+				h.logger.Error("failed to download cover", "hash", hash, "error", err)
+			} else if coverPath != "" {
+				if b, ok := h.state.GetBook(hash); ok {
+					b.CoverPath = coverPath
+					b.Series = book.SeriesName()
+					h.state.SetBook(hash, b)
+				}
+			}
+		}
+	}
+
 	if err := h.state.Save(); err != nil {
 		http.Error(w, fmt.Sprintf("failed to save state: %v", err), http.StatusInternalServerError)
 		return
@@ -320,9 +446,28 @@ func (h *handlers) handleLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pct := 0
+	if book.ReadestProgress[1] > 0 {
+		pct = book.ReadestProgress[0] * 100 / book.ReadestProgress[1]
+	}
+	finished := book.ReadestStatus == "finished" ||
+		(book.ReadestProgress[1] > 0 && book.ReadestProgress[0] >= book.ReadestProgress[1])
+	cardCoverURL := ""
+	if book.CoverPath != "" {
+		// Cache-bust with timestamp so relinked covers update immediately.
+		cardCoverURL = fmt.Sprintf("/covers/%s?t=%d", book.CoverPath, time.Now().UnixMilli())
+	}
+
+	card := bookCardData{
+		BookState:   book,
+		ProgressPct: pct,
+		IsFinished:  finished,
+		CoverURL:    cardCoverURL,
+	}
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("HX-Trigger", "closeModal")
-	if err := h.tmpl.ExecuteTemplate(w, "book_row.html", book); err != nil {
+	if err := h.tmpl.ExecuteTemplate(w, "book_card.html", card); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -353,22 +498,25 @@ func (h *handlers) handleUnlink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	book, _ = h.state.GetBook(hash)
+	card := bookCardData{
+		BookState: book,
+		CoverURL:  "",
+	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.tmpl.ExecuteTemplate(w, "book_row.html", book); err != nil {
+	w.Header().Set("HX-Trigger", "closeModal")
+	if err := h.tmpl.ExecuteTemplate(w, "book_card.html", card); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
 
-type statusData struct {
-	LastBookSync   string
-	LastConfigSync string
+type sidebarStatusData struct {
+	LastSync       string
 	MatchedCount   int
 	UnmatchedCount int
 }
 
-// handleStatus renders the sync status page.
-func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
+func (h *handlers) buildSidebarStatus() sidebarStatusData {
 	books := h.state.ListBooks()
 	var matched, unmatched int
 	for _, b := range books {
@@ -379,27 +527,37 @@ func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	fmtTime := func(ms int64) string {
-		if ms == 0 {
-			return "never"
+	lastSync := "never"
+	ts := h.state.LastBookSync
+	if h.state.LastConfigSync > ts {
+		ts = h.state.LastConfigSync
+	}
+	if ts > 0 {
+		ago := time.Since(time.UnixMilli(ts))
+		switch {
+		case ago < time.Minute:
+			lastSync = "just now"
+		case ago < time.Hour:
+			lastSync = fmt.Sprintf("%d min ago", int(ago.Minutes()))
+		case ago < 24*time.Hour:
+			lastSync = fmt.Sprintf("%d hours ago", int(ago.Hours()))
+		default:
+			lastSync = time.UnixMilli(ts).UTC().Format("Jan 2, 15:04 UTC")
 		}
-		return time.UnixMilli(ms).UTC().Format(time.RFC3339)
 	}
 
-	data := statusData{
-		LastBookSync:   fmtTime(h.state.LastBookSync),
-		LastConfigSync: fmtTime(h.state.LastConfigSync),
+	return sidebarStatusData{
+		LastSync:       lastSync,
 		MatchedCount:   matched,
 		UnmatchedCount: unmatched,
 	}
+}
 
-	tmplName := "status.html"
-	if r.Header.Get("HX-Request") != "" {
-		tmplName = "status_content"
-	}
-
+// handleSidebarStatus returns the sidebar status partial for htmx refresh.
+func (h *handlers) handleSidebarStatus(w http.ResponseWriter, r *http.Request) {
+	data := h.buildSidebarStatus()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := h.tmpl.ExecuteTemplate(w, tmplName, data); err != nil {
+	if err := h.tmpl.ExecuteTemplate(w, "sidebar_status", data); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 }
@@ -408,28 +566,69 @@ func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (h *handlers) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("manual sync triggered")
 	go func() {
-		_ = h.engine.SyncNow(context.Background())
+		_ = h.engine.SyncNow(h.ctx)
 	}()
 
 	if r.Header.Get("HX-Request") != "" {
-		h.handleStatus(w, r)
+		h.handleSidebarStatus(w, r)
 		return
 	}
-	http.Redirect(w, r, "/status", http.StatusSeeOther)
+	http.Redirect(w, r, "/books", http.StatusSeeOther)
 }
 
 // handleFullSync resets sync timestamps and re-pulls everything from Readest.
 func (h *handlers) handleFullSync(w http.ResponseWriter, r *http.Request) {
 	h.logger.Info("full sync triggered")
 	go func() {
-		_ = h.engine.FullSync(context.Background())
+		_ = h.engine.FullSync(h.ctx)
 	}()
 
 	if r.Header.Get("HX-Request") != "" {
-		h.handleStatus(w, r)
+		h.handleSidebarStatus(w, r)
 		return
 	}
-	http.Redirect(w, r, "/status", http.StatusSeeOther)
+	http.Redirect(w, r, "/books", http.StatusSeeOther)
+}
+
+// handleSSE streams sync events as Server-Sent Events.
+func (h *handlers) handleSSE(w http.ResponseWriter, r *http.Request) {
+	if h.events == nil {
+		http.Error(w, "event streaming not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ch := h.events.Subscribe()
+	if ch == nil {
+		http.Error(w, "too many connections", http.StatusServiceUnavailable)
+		return
+	}
+	defer h.events.Unsubscribe(ch)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case evt, ok := <-ch:
+			if !ok {
+				return
+			}
+			data, _ := json.Marshal(evt)
+			if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 // scoreSearchResults assigns a relevance score to each result based on how

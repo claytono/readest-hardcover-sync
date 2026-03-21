@@ -111,7 +111,11 @@ func runServer(logger *slog.Logger) {
 	defer cancel()
 
 	matcher := syncsvc.NewMatcher(hardcoverClient, cfg.EnableTitleMatch)
-	engine := syncsvc.NewEngine(readestClient, hardcoverClient, hardcoverClient, st, matcher, logger, cfg.ManualSync)
+	events := syncsvc.NewEventBus(200)
+	engine := syncsvc.NewEngine(readestClient, hardcoverClient, hardcoverClient, st, matcher, logger, cfg.ManualSync, &syncsvc.EngineOptions{
+		Events:    events,
+		CoversDir: cfg.CoversDir,
+	})
 
 	go engine.Run(ctx, cfg.SyncInterval)
 
@@ -120,7 +124,7 @@ func runServer(logger *slog.Logger) {
 		syncMode = "manual"
 	}
 
-	server := web.NewServer(st, hardcoverClient, hardcoverClient, engine, cfg.ListenAddr, logger)
+	server := web.NewServer(ctx, st, hardcoverClient, hardcoverClient, engine, events, cfg.ListenAddr, cfg.CoversDir, logger)
 	go func() {
 		logger.Info("readest-hardcover-sync starting", "listen", cfg.ListenAddr, "sync_mode", syncMode)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -361,7 +365,7 @@ func runDryRun(logger *slog.Logger) {
 
 	dryRunUpdater := syncsvc.NewDryRunUpdater(hardcoverClient, logger)
 	matcher := syncsvc.NewMatcher(hardcoverClient, cfg.EnableTitleMatch)
-	engine := syncsvc.NewEngine(readestClient, hardcoverClient, dryRunUpdater, st, matcher, logger, false)
+	engine := syncsvc.NewEngine(readestClient, hardcoverClient, dryRunUpdater, st, matcher, logger, false, nil)
 
 	ctx := context.Background()
 	tickErr := engine.Tick(ctx)

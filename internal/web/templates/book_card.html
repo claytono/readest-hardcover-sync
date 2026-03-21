@@ -1,0 +1,47 @@
+{{define "book_card.html"}}
+<div class="book-card{{if .Unmatched}} unmatched{{end}}"
+     id="book-{{.BookHash}}"
+     data-matched="{{if .HardcoverBookID}}true{{else}}false{{end}}"
+     data-title="{{.Title}}"
+     data-author="{{.Author}}"
+     data-slug="{{.HardcoverSlug}}"
+     data-series="{{.Series}}"
+     hx-get="/books/{{.BookHash}}/detail"
+     hx-target="#detail-modal"
+     hx-swap="innerHTML">
+  <div class="card-cover">
+    {{if .CoverURL}}
+    <img src="{{.CoverURL}}" alt="{{.Title}}" loading="lazy">
+    {{else if .Unmatched}}
+    <div class="cover-placeholder"><span class="icon">&#10067;</span>No Cover</div>
+    {{else}}
+    <div class="cover-placeholder"><span class="icon">&#128214;</span>No Cover</div>
+    {{end}}
+  </div>
+  <div class="card-body">
+    <div class="card-title" title="{{.Title}}">{{.Title}}</div>
+    <div class="card-author" title="{{.Author}}">{{if .Author}}{{.Author}}{{else}}&mdash;{{end}}</div>
+    {{if not .Unmatched}}
+    <div class="progress-bar">
+      <div class="progress-fill{{if .IsFinished}} finished{{else}} reading{{end}}" style="width:{{.ProgressPct}}%"></div>
+    </div>
+    <div class="card-footer">
+      {{if .IsFinished}}
+      <span class="status-finished">&#10003; Read</span>
+      {{else}}
+      <span class="progress-text">{{.ProgressPct}}%</span>
+      {{end}}
+      <span class="match-badge">&#9679; {{.MatchMethod}}</span>
+    </div>
+    {{else}}
+    <div class="card-footer">
+      <span class="status-unmatched">Unmatched</span>
+      <button class="link-btn"
+        hx-get="/books/{{.BookHash}}/link-modal"
+        hx-target="#link-modal"
+        onclick="event.stopPropagation()">Link</button>
+    </div>
+    {{end}}
+  </div>
+</div>
+{{end}}

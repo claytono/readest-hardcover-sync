@@ -7,7 +7,7 @@
       {{if .CoverURL}}<img src="{{.CoverURL}}" alt="cover">{{else}}<div class="no-cover">No cover</div>{{end}}
     </div>
     <div class="result-details">
-      <div class="result-title"><a href="https://hardcover.app/books/{{.Slug}}" target="_blank">{{.Title}}</a></div>
+      <div class="result-title"><a href="https://hardcover.app/books/{{.Slug}}" target="_blank" rel="noopener noreferrer">{{.Title}}</a></div>
       <div class="result-author">{{.Author}}</div>
       {{if .Series}}<div class="result-series">{{.Series}}</div>{{end}}
       <div class="result-slug">{{.Slug}}</div>

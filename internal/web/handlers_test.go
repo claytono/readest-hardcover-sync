@@ -23,11 +23,12 @@ import (
 // --- stub implementations ---
 
 type stubFinder struct {
-	results []hardcover.Book
+	results  []hardcover.Book
+	slugBook *hardcover.Book
 }
 
 func (s *stubFinder) FindBookBySlug(_ context.Context, _ string) (*hardcover.Book, error) {
-	return nil, nil
+	return s.slugBook, nil
 }
 func (s *stubFinder) FindEditionByISBN13(_ context.Context, _ string) (*hardcover.Edition, error) {
 	return nil, nil
@@ -92,6 +93,7 @@ func newTestHandlers(st *state.State) *handlers {
 		syncsvc.NewMatcher(finder, false),
 		logger,
 		false,
+		nil,
 	)
 	statuses, _ := updater.GetStatuses(context.Background())
 	statusNames := make(map[int]string, len(statuses))
@@ -103,6 +105,7 @@ func newTestHandlers(st *state.State) *handlers {
 		finder:      finder,
 		updater:     updater,
 		engine:      engine,
+		ctx:         context.Background(),
 		statusNames: statusNames,
 		logger:      logger,
 	}
@@ -379,6 +382,7 @@ func newTestHandlersWithFinder(st *state.State, finder syncsvc.BookFinder) *hand
 		syncsvc.NewMatcher(finder, false),
 		logger,
 		false,
+		nil,
 	)
 	statuses, _ := updater.GetStatuses(context.Background())
 	statusNames := make(map[int]string, len(statuses))
@@ -390,6 +394,7 @@ func newTestHandlersWithFinder(st *state.State, finder syncsvc.BookFinder) *hand
 		finder:      finder,
 		updater:     updater,
 		engine:      engine,
+		ctx:         context.Background(),
 		statusNames: statusNames,
 		logger:      logger,
 	}
@@ -550,6 +555,7 @@ func newTestHandlersWithFinderAndUpdater(st *state.State, finder syncsvc.BookFin
 		syncsvc.NewMatcher(finder, false),
 		logger,
 		false,
+		nil,
 	)
 	statuses, _ := updater.GetStatuses(context.Background())
 	statusNames := make(map[int]string, len(statuses))
@@ -561,6 +567,7 @@ func newTestHandlersWithFinderAndUpdater(st *state.State, finder syncsvc.BookFin
 		finder:      finder,
 		updater:     updater,
 		engine:      engine,
+		ctx:         context.Background(),
 		statusNames: statusNames,
 		logger:      logger,
 	}
@@ -665,14 +672,14 @@ func TestHandleUnlink_Success(t *testing.T) {
 	}
 }
 
-// TestHandleStatus_Empty verifies the status page renders with zero counts.
-func TestHandleStatus_Empty(t *testing.T) {
+// TestHandleSidebarStatus_Empty verifies the sidebar status renders with zero counts.
+func TestHandleSidebarStatus_Empty(t *testing.T) {
 	st := makeState(t)
 	h := newTestHandlers(st)
 
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/sidebar-status", nil)
 	rr := httptest.NewRecorder()
-	h.handleStatus(rr, req)
+	h.handleSidebarStatus(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
@@ -683,8 +690,8 @@ func TestHandleStatus_Empty(t *testing.T) {
 	}
 }
 
-// TestHandleStatus_WithBooks verifies the status page counts matched and unmatched books.
-func TestHandleStatus_WithBooks(t *testing.T) {
+// TestHandleSidebarStatus_WithBooks verifies the sidebar status counts matched and unmatched books.
+func TestHandleSidebarStatus_WithBooks(t *testing.T) {
 	st := makeState(t)
 	st.SetBook("m1", state.BookState{BookHash: "m1", Title: "Matched One", HardcoverBookID: 10})
 	st.SetBook("m2", state.BookState{BookHash: "m2", Title: "Matched Two", HardcoverBookID: 20})
@@ -696,19 +703,19 @@ func TestHandleStatus_WithBooks(t *testing.T) {
 
 	h := newTestHandlers(st)
 
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	req := httptest.NewRequest(http.MethodGet, "/sidebar-status", nil)
 	rr := httptest.NewRecorder()
-	h.handleStatus(rr, req)
+	h.handleSidebarStatus(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "<dd>2</dd>") {
-		t.Errorf("expected matched count '<dd>2</dd>' in body")
+	if !strings.Contains(body, "2 books") {
+		t.Errorf("expected matched count '2 books' in body, got: %s", body)
 	}
-	if !strings.Contains(body, "<dd>1</dd>") {
-		t.Errorf("expected unmatched count '<dd>1</dd>' in body")
+	if !strings.Contains(body, "1 book") {
+		t.Errorf("expected unmatched count '1 book' in body, got: %s", body)
 	}
 	if strings.Contains(body, "never") {
 		t.Errorf("non-zero timestamps should not show 'never'")
@@ -837,9 +844,10 @@ func TestNewServer(t *testing.T) {
 		syncsvc.NewMatcher(finder, false),
 		logger,
 		false,
+		nil,
 	)
 
-	srv := NewServer(st, finder, updater, engine, ":0", logger)
+	srv := NewServer(context.Background(), st, finder, updater, engine, nil, ":0", "", logger)
 	if srv == nil {
 		t.Fatal("expected non-nil server")
 	}
@@ -1020,8 +1028,8 @@ func TestHandleTriggerSync(t *testing.T) {
 	if rr.Code != http.StatusSeeOther {
 		t.Errorf("expected redirect 303, got %d", rr.Code)
 	}
-	if loc := rr.Header().Get("Location"); loc != "/status" {
-		t.Errorf("expected Location=/status, got %q", loc)
+	if loc := rr.Header().Get("Location"); loc != "/books" {
+		t.Errorf("expected Location=/books, got %q", loc)
 	}
 
 	// Wait for the background goroutine to finish by polling for the state
@@ -1057,8 +1065,8 @@ func TestHandleTriggerSync_HtmxReturnsPartial(t *testing.T) {
 		t.Errorf("expected 200, got %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "Sync Status") {
-		t.Error("expected body to contain 'Sync Status'")
+	if !strings.Contains(body, "sidebar-status") {
+		t.Error("expected body to contain 'sidebar-status'")
 	}
 	if strings.Contains(body, "<!DOCTYPE html>") {
 		t.Error("htmx response should not contain full HTML document")
@@ -1084,8 +1092,8 @@ func TestHandleFullSync(t *testing.T) {
 	if rr.Code != http.StatusSeeOther {
 		t.Errorf("expected redirect 303, got %d", rr.Code)
 	}
-	if loc := rr.Header().Get("Location"); loc != "/status" {
-		t.Errorf("expected Location=/status, got %q", loc)
+	if loc := rr.Header().Get("Location"); loc != "/books" {
+		t.Errorf("expected Location=/books, got %q", loc)
 	}
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -1119,33 +1127,564 @@ func TestHandleFullSync_HtmxReturnsPartial(t *testing.T) {
 		t.Errorf("expected 200, got %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "Sync Status") {
-		t.Error("expected body to contain 'Sync Status'")
+	if !strings.Contains(body, "sidebar-status") {
+		t.Error("expected body to contain 'sidebar-status'")
 	}
 	if strings.Contains(body, "<!DOCTYPE html>") {
 		t.Error("htmx response should not contain full HTML document")
 	}
 }
 
-// TestHandleStatus_HtmxReturnsPartial verifies that an htmx GET /status
-// returns just the status_content partial, not the full page.
-func TestHandleStatus_HtmxReturnsPartial(t *testing.T) {
+// TestHandleSidebarStatus_ReturnsPartial verifies that GET /sidebar-status
+// returns just the sidebar status partial.
+func TestHandleSidebarStatus_ReturnsPartial(t *testing.T) {
 	st := makeState(t)
 	h := newTestHandlers(st)
 
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
-	req.Header.Set("HX-Request", "true")
+	req := httptest.NewRequest(http.MethodGet, "/sidebar-status", nil)
 	rr := httptest.NewRecorder()
-	h.handleStatus(rr, req)
+	h.handleSidebarStatus(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rr.Code)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "Sync Status") {
-		t.Error("expected body to contain 'Sync Status'")
+	if !strings.Contains(body, "sidebar-status") {
+		t.Error("expected body to contain 'sidebar-status'")
 	}
 	if strings.Contains(body, "<!DOCTYPE html>") {
-		t.Error("htmx response should not contain full HTML document")
+		t.Error("response should not contain full HTML document")
+	}
+}
+
+// TestHandleBookDetail_Unmatched verifies the detail modal for an unmatched book.
+func TestHandleBookDetail_Unmatched(t *testing.T) {
+	st := makeState(t)
+	st.SetBook("unmhash", state.BookState{
+		BookHash:  "unmhash",
+		Title:     "Unmatched Detail",
+		Author:    "Author U",
+		Unmatched: true,
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books/unmhash/detail", nil)
+	req = setPathValue(req, "GET /books/{hash}/detail")
+	rr := httptest.NewRecorder()
+	h.handleBookDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Link to Hardcover") {
+		t.Error("expected Link button for unmatched book")
+	}
+}
+
+// TestHandleTriggerSync_NonHtmx verifies redirect for non-htmx sync request.
+func TestHandleTriggerSync_NonHtmx(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "sync-nonhtmx-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	st := state.New(tmpDir + "/state.json")
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodPost, "/sync", nil)
+	rr := httptest.NewRecorder()
+	h.handleTriggerSync(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Errorf("expected 303, got %d", rr.Code)
+	}
+}
+
+// TestHandleFullSync_NonHtmx verifies redirect for non-htmx full sync request.
+func TestHandleFullSync_NonHtmx(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "fullsync-nonhtmx-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	st := state.New(tmpDir + "/state.json")
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodPost, "/full-sync", nil)
+	rr := httptest.NewRecorder()
+	h.handleFullSync(rr, req)
+
+	if rr.Code != http.StatusSeeOther {
+		t.Errorf("expected 303, got %d", rr.Code)
+	}
+}
+
+// TestHandleLinkModal_WithCover verifies the link modal renders with cover URL.
+func TestHandleLinkModal_WithCover(t *testing.T) {
+	meta := `{"identifier":"test","altIdentifier":[{"scheme":"HARDCOVER","value":"test-slug"}]}`
+	st := makeState(t)
+	st.SetBook("lmhash", state.BookState{
+		BookHash:        "lmhash",
+		Title:           "Link Modal Book",
+		Author:          "Author LM",
+		CoverPath:       "lmhash.jpg",
+		HardcoverBookID: 10,
+		HardcoverSlug:   "lm-book",
+		MatchMethod:     "slug",
+		Metadata:        &meta,
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books/lmhash/link-modal", nil)
+	req = setPathValue(req, "GET /books/{hash}/link-modal")
+	rr := httptest.NewRecorder()
+	h.handleLinkModal(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Link Modal Book") {
+		t.Error("expected title in modal")
+	}
+}
+
+// TestHandleBooks_SortByActivity verifies books are sorted by LastActivityAt.
+func TestHandleBooks_SortByActivity(t *testing.T) {
+	st := makeState(t)
+	st.SetBook("old", state.BookState{
+		BookHash:        "old",
+		Title:           "Old Book",
+		Author:          "Author O",
+		HardcoverBookID: 1,
+		MatchMethod:     "slug",
+		LastActivityAt:  1000,
+	})
+	st.SetBook("new", state.BookState{
+		BookHash:        "new",
+		Title:           "New Book",
+		Author:          "Author N",
+		HardcoverBookID: 2,
+		MatchMethod:     "slug",
+		LastActivityAt:  2000,
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books", nil)
+	rr := httptest.NewRecorder()
+	h.handleBooks(rr, req)
+
+	body := rr.Body.String()
+	newIdx := strings.Index(body, "New Book")
+	oldIdx := strings.Index(body, "Old Book")
+	if newIdx == -1 || oldIdx == -1 {
+		t.Fatal("expected both books in body")
+	}
+	if newIdx > oldIdx {
+		t.Error("expected New Book (higher activity) to appear before Old Book")
+	}
+}
+
+// TestHandleSSE_NilEventBus returns 503 when events are nil.
+func TestHandleSSE_NilEventBus(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st) // events is nil by default
+
+	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	rr := httptest.NewRecorder()
+	h.handleSSE(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rr.Code)
+	}
+}
+
+// TestHandleSSE_TooManySubscribers returns 503 when subscriber limit is reached.
+func TestHandleSSE_TooManySubscribers(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st)
+	eb := syncsvc.NewEventBus(10)
+	h.events = eb
+
+	// Exhaust subscriber slots.
+	var channels []chan syncsvc.SyncEvent
+	for i := 0; i < 10; i++ {
+		ch := eb.Subscribe()
+		if ch != nil {
+			channels = append(channels, ch)
+		}
+	}
+	defer func() {
+		for _, ch := range channels {
+			eb.Unsubscribe(ch)
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodGet, "/events", nil)
+	rr := httptest.NewRecorder()
+	h.handleSSE(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d", rr.Code)
+	}
+}
+
+// TestHandleSSE_StreamsEvents verifies SSE handler streams events.
+func TestHandleSSE_StreamsEvents(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st)
+	eb := syncsvc.NewEventBus(10)
+	h.events = eb
+
+	// Use a context we can cancel to end the SSE stream.
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		h.handleSSE(rr, req)
+		close(done)
+	}()
+
+	// Publish an event.
+	eb.Publish(syncsvc.SyncEvent{Type: "test", Title: "hello"})
+
+	// Give the handler a moment to write.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	<-done
+
+	if ct := rr.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("expected Content-Type text/event-stream, got %q", ct)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "data:") {
+		t.Errorf("expected SSE data line in body, got: %s", body)
+	}
+	if !strings.Contains(body, "hello") {
+		t.Errorf("expected event data to contain 'hello', got: %s", body)
+	}
+}
+
+// TestHandleBookDetail verifies the detail modal renders for a known book.
+func TestHandleBookDetail(t *testing.T) {
+	st := makeState(t)
+	st.SetBook("detailhash", state.BookState{
+		BookHash:        "detailhash",
+		Title:           "Detail Book",
+		Author:          "Author D",
+		HardcoverBookID: 42,
+		HardcoverSlug:   "detail-book",
+		MatchMethod:     "slug",
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books/detailhash/detail", nil)
+	req = setPathValue(req, "GET /books/{hash}/detail")
+	rr := httptest.NewRecorder()
+	h.handleBookDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Detail Book") {
+		t.Error("expected body to contain book title")
+	}
+	if !strings.Contains(body, "detail-book") {
+		t.Error("expected body to contain slug")
+	}
+}
+
+// TestHandleBookDetail_NotFound verifies 404 for unknown hash.
+func TestHandleBookDetail_NotFound(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books/unknown/detail", nil)
+	req = setPathValue(req, "GET /books/{hash}/detail")
+	rr := httptest.NewRecorder()
+	h.handleBookDetail(rr, req)
+
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", rr.Code)
+	}
+}
+
+// TestHandleBooks_RendersCards verifies the books page renders card elements.
+func TestHandleBooks_RendersCards(t *testing.T) {
+	st := makeState(t)
+	st.SetBook("card1", state.BookState{
+		BookHash:        "card1",
+		Title:           "Card Book",
+		Author:          "Card Author",
+		HardcoverBookID: 1,
+		HardcoverSlug:   "card-book",
+		MatchMethod:     "slug",
+		ReadestProgress: [2]int{50, 100},
+	})
+	st.SetBook("card2", state.BookState{
+		BookHash:  "card2",
+		Title:     "Unmatched Card",
+		Author:    "Author U",
+		Unmatched: true,
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books", nil)
+	rr := httptest.NewRecorder()
+	h.handleBooks(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "book-card") {
+		t.Error("expected body to contain book-card elements")
+	}
+	if !strings.Contains(body, "Card Book") {
+		t.Error("expected body to contain 'Card Book'")
+	}
+	if !strings.Contains(body, "Unmatched Card") {
+		t.Error("expected body to contain 'Unmatched Card'")
+	}
+	if !strings.Contains(body, "50%") {
+		t.Error("expected body to contain progress percentage")
+	}
+}
+
+// TestHandleBooks_Empty verifies the books page renders with no books.
+func TestHandleBooks_Empty(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books", nil)
+	rr := httptest.NewRecorder()
+	h.handleBooks(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "No books found") {
+		t.Error("expected empty state message")
+	}
+}
+
+// TestHandleBooks_WithFinishedBook verifies finished book rendering.
+func TestHandleBooks_WithFinishedBook(t *testing.T) {
+	st := makeState(t)
+	st.SetBook("fin1", state.BookState{
+		BookHash:        "fin1",
+		Title:           "Finished Book",
+		Author:          "Author F",
+		HardcoverBookID: 1,
+		HardcoverSlug:   "finished-book",
+		MatchMethod:     "slug",
+		ReadestProgress: [2]int{100, 100},
+		ReadestStatus:   "finished",
+		CoverPath:       "fin1.jpg",
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books", nil)
+	rr := httptest.NewRecorder()
+	h.handleBooks(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Read") {
+		t.Error("expected finished status in body")
+	}
+	if !strings.Contains(body, "/covers/fin1.jpg") {
+		t.Error("expected cover URL in body")
+	}
+}
+
+// TestHandleBookDetail_WithMetadata verifies detail modal renders identifiers and status name.
+func TestHandleBookDetail_WithMetadata(t *testing.T) {
+	meta := `{"identifier":"urn:isbn:9781234567890","altIdentifier":["mobi-asin:B012345678"]}`
+	st := makeState(t)
+	st.SetBook("metahash", state.BookState{
+		BookHash:        "metahash",
+		Title:           "Meta Book",
+		Author:          "Author M",
+		HardcoverBookID: 42,
+		HardcoverSlug:   "meta-book",
+		MatchMethod:     "isbn13",
+		Metadata:        &meta,
+		CoverPath:       "metahash.jpg",
+		LastStatusSent:  2,
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodGet, "/books/metahash/detail", nil)
+	req = setPathValue(req, "GET /books/{hash}/detail")
+	rr := httptest.NewRecorder()
+	h.handleBookDetail(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Meta Book") {
+		t.Error("expected title in detail")
+	}
+	if !strings.Contains(body, "/covers/metahash.jpg") {
+		t.Error("expected cover URL in detail")
+	}
+	if !strings.Contains(body, "Currently Reading") {
+		t.Error("expected resolved status name 'Currently Reading' in detail")
+	}
+	if !strings.Contains(body, "ASIN") {
+		t.Error("expected ASIN identifier in detail")
+	}
+}
+
+// TestHandleSidebarStatus_RelativeTime verifies relative time formatting.
+func TestHandleSidebarStatus_RelativeTime(t *testing.T) {
+	tests := []struct {
+		name     string
+		ago      time.Duration
+		contains string
+	}{
+		{"just now", 30 * time.Second, "just now"},
+		{"minutes ago", 5 * time.Minute, "min ago"},
+		{"hours ago", 3 * time.Hour, "hours ago"},
+		{"old date", 48 * time.Hour, "UTC"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := makeState(t)
+			st.LastBookSync = time.Now().Add(-tc.ago).UnixMilli()
+			h := newTestHandlers(st)
+
+			req := httptest.NewRequest(http.MethodGet, "/sidebar-status", nil)
+			rr := httptest.NewRecorder()
+			h.handleSidebarStatus(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d", rr.Code)
+			}
+			body := rr.Body.String()
+			if !strings.Contains(body, tc.contains) {
+				t.Errorf("expected %q in body, got: %s", tc.contains, body)
+			}
+		})
+	}
+}
+
+// TestHandleUnlink_ReturnsCard verifies unlink returns a card partial.
+func TestHandleUnlink_ReturnsCard(t *testing.T) {
+	st := makeState(t)
+	st.SetBook("ulhash", state.BookState{
+		BookHash:        "ulhash",
+		Title:           "Unlink Me",
+		Author:          "Author U",
+		HardcoverBookID: 99,
+		HardcoverSlug:   "unlink-me",
+		MatchMethod:     "slug",
+	})
+	h := newTestHandlers(st)
+
+	req := httptest.NewRequest(http.MethodPost, "/books/ulhash/unlink", nil)
+	req = setPathValue(req, "POST /books/{hash}/unlink")
+	rr := httptest.NewRecorder()
+	h.handleUnlink(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "book-card") {
+		t.Error("expected book-card in response")
+	}
+	if !strings.Contains(body, "Unmatched") {
+		t.Error("expected Unmatched status after unlink")
+	}
+}
+
+// TestHandleLink_WithCoverDownload verifies that linking downloads a cover server-side.
+func TestHandleLink_WithCoverDownload(t *testing.T) {
+	coverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake-cover"))
+	}))
+	defer coverSrv.Close()
+
+	st := makeState(t)
+	st.SetBook("coverhash", state.BookState{BookHash: "coverhash", Title: "Cover Test", Author: "Author C"})
+
+	finder := &stubFinder{
+		slugBook: &hardcover.Book{
+			ID:          55,
+			Slug:        "cover-test",
+			CachedImage: &hardcover.CachedImage{URL: coverSrv.URL + "/cover.jpg"},
+			BookSeries:  []hardcover.BookSeriesEntry{{Series: hardcover.SeriesInfo{Name: "Test Series"}, Position: 1}},
+		},
+	}
+	updater := &stubUpdater{}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	engine := syncsvc.NewEngine(
+		&stubReadest{},
+		finder,
+		updater,
+		st,
+		syncsvc.NewMatcher(finder, false),
+		logger,
+		false,
+		nil,
+	)
+	statuses, _ := updater.GetStatuses(context.Background())
+	statusNames := make(map[int]string, len(statuses))
+	for _, s := range statuses {
+		statusNames[s.ID] = s.Status
+	}
+	h := &handlers{
+		state:       st,
+		finder:      finder,
+		updater:     updater,
+		engine:      engine,
+		ctx:         context.Background(),
+		coversDir:   t.TempDir(),
+		statusNames: statusNames,
+		logger:      logger,
+	}
+	h.loadTemplates()
+
+	form := url.Values{
+		"book_id":       {"55"},
+		"slug":          {"cover-test"},
+		"edition_id":    {"100"},
+		"edition_pages": {"200"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/books/coverhash/link",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = setPathValue(req, "POST /books/{hash}/link")
+	rr := httptest.NewRecorder()
+	h.handleLink(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	book, ok := st.GetBook("coverhash")
+	if !ok {
+		t.Fatal("book should exist")
+	}
+	if book.HardcoverBookID != 55 {
+		t.Errorf("expected HardcoverBookID=55, got %d", book.HardcoverBookID)
+	}
+	if book.CoverPath == "" {
+		t.Error("expected cover to be downloaded")
+	}
+	if book.Series == "" {
+		t.Error("expected series to be set")
 	}
 }
