@@ -426,11 +426,11 @@ func (h *handlers) handleLink(w http.ResponseWriter, r *http.Request) {
 			if coverPath, err := syncsvc.DownloadCover(h.coversDir, hash, book.CoverURL()); err != nil {
 				h.logger.Error("failed to download cover", "hash", hash, "error", err)
 			} else if coverPath != "" {
-				if b, ok := h.state.GetBook(hash); ok {
+				seriesName := book.SeriesName()
+				h.state.UpdateBook(hash, func(b *state.BookState) {
 					b.CoverPath = coverPath
-					b.Series = book.SeriesName()
-					h.state.SetBook(hash, b)
-				}
+					b.Series = seriesName
+				})
 			}
 		}
 	}
@@ -483,15 +483,19 @@ func (h *handlers) handleUnlink(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("unlinking book", "hash", hash, "title", book.Title, "was_slug", book.HardcoverSlug)
-	book.HardcoverBookID = 0
-	book.HardcoverSlug = ""
-	book.EditionID = 0
-	book.EditionPages = 0
-	book.MatchMethod = ""
-	book.UserBookID = 0
-	book.Unmatched = true
-
-	h.state.SetBook(hash, book)
+	h.state.UpdateBook(hash, func(b *state.BookState) {
+		b.HardcoverBookID = 0
+		b.HardcoverSlug = ""
+		b.EditionID = 0
+		b.EditionPages = 0
+		b.MatchMethod = ""
+		b.UserBookID = 0
+		b.UserBookReadID = 0
+		b.LastStatusSent = 0
+		b.LastProgressSent = 0
+		b.ReadingFormatID = 0
+		b.Unmatched = true
+	})
 	if err := h.state.Save(); err != nil {
 		http.Error(w, fmt.Sprintf("failed to save state: %v", err), http.StatusInternalServerError)
 		return
@@ -528,9 +532,9 @@ func (h *handlers) buildSidebarStatus() sidebarStatusData {
 	}
 
 	lastSync := "never"
-	ts := h.state.LastBookSync
-	if h.state.LastConfigSync > ts {
-		ts = h.state.LastConfigSync
+	ts := h.state.GetLastBookSync()
+	if configTS := h.state.GetLastConfigSync(); configTS > ts {
+		ts = configTS
 	}
 	if ts > 0 {
 		ago := time.Since(time.UnixMilli(ts))

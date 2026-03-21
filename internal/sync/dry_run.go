@@ -37,7 +37,7 @@ func (d *dryRunUpdater) GetUserBook(ctx context.Context, bookID int) (*hardcover
 // InsertUserBook returns a fake UserBook without calling the real implementation.
 func (d *dryRunUpdater) InsertUserBook(_ context.Context, bookID, statusID, _ int, editionID *int) (*hardcover.UserBook, error) {
 	return &hardcover.UserBook{
-		ID:        -1,
+		ID:        0,
 		BookID:    bookID,
 		StatusID:  statusID,
 		EditionID: editionID,
@@ -55,7 +55,7 @@ func (d *dryRunUpdater) UpdateUserBook(_ context.Context, id int, statusID int) 
 // InsertUserBookRead returns a fake UserBookRead without calling the real implementation.
 func (d *dryRunUpdater) InsertUserBookRead(_ context.Context, _ int, progressPages int, _ *int, _ string, _ *string) (*hardcover.UserBookRead, error) {
 	return &hardcover.UserBookRead{
-		ID:            -1,
+		ID:            0,
 		ProgressPages: &progressPages,
 	}, nil
 }

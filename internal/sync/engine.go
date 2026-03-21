@@ -116,8 +116,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	}
 	e.syncing = true
 	if e.pendingFullSync {
-		e.state.LastBookSync = 0
-		e.state.LastConfigSync = 0
+		e.state.ResetSyncTimestamps()
 		e.pendingFullSync = false
 	}
 	e.mu.Unlock()
@@ -169,7 +168,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	e.emit(SyncEvent{Type: "sync_start", Detail: fmt.Sprintf("%d books in state", len(allBooks))})
 
 	// Step 2: Pull books since last sync.
-	books, err := e.readest.PullBooks(ctx, e.state.LastBookSync)
+	books, err := e.readest.PullBooks(ctx, e.state.GetLastBookSync())
 	if err != nil {
 		return err
 	}
@@ -197,7 +196,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 	}
 
 	// Step 3: Pull configs since last sync.
-	configs, err := e.readest.PullConfigs(ctx, e.state.LastConfigSync)
+	configs, err := e.readest.PullConfigs(ctx, e.state.GetLastConfigSync())
 	if err != nil {
 		return err
 	}
@@ -257,32 +256,38 @@ func (e *Engine) Tick(ctx context.Context) error {
 			if book == nil {
 				continue
 			}
-			changed := false
+			newSeries := ""
 			if bs.Series == "" && book.SeriesName() != "" {
-				bs.Series = book.SeriesName()
-				changed = true
+				newSeries = book.SeriesName()
 			}
+			newCoverPath := ""
 			if bs.CoverPath == "" && book.CoverURL() != "" {
 				coverPath, err := DownloadCover(e.coversDir, bs.BookHash, book.CoverURL())
 				if err != nil {
 					e.logger.Error("failed to download cover", "title", bs.Title, "error", err)
 				} else if coverPath != "" {
-					bs.CoverPath = coverPath
-					changed = true
+					newCoverPath = coverPath
 				}
 			}
-			if changed {
-				e.state.SetBook(bs.BookHash, bs)
+			if newSeries != "" || newCoverPath != "" {
+				e.state.UpdateBook(bs.BookHash, func(b *state.BookState) {
+					if newSeries != "" {
+						b.Series = newSeries
+					}
+					if newCoverPath != "" {
+						b.CoverPath = newCoverPath
+					}
+				})
 			}
 		}
 	}
 
 	// Step 6: Update state timestamps from max updated_at of returned records.
-	if maxBookUpdatedAt > e.state.LastBookSync {
-		e.state.LastBookSync = maxBookUpdatedAt
+	if maxBookUpdatedAt > e.state.GetLastBookSync() {
+		e.state.SetLastBookSync(maxBookUpdatedAt)
 	}
-	if maxConfigUpdatedAt > e.state.LastConfigSync {
-		e.state.LastConfigSync = maxConfigUpdatedAt
+	if maxConfigUpdatedAt > e.state.GetLastConfigSync() {
+		e.state.SetLastConfigSync(maxConfigUpdatedAt)
 	}
 
 	// Step 6: Save state.
@@ -309,14 +314,13 @@ func (e *Engine) Tick(ctx context.Context) error {
 // processBook handles a single DBBook: updates existing state or matches and creates new entry.
 func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 	// If already in state, just update ReadestStatus if changed.
-	if existing, ok := e.state.GetBook(book.BookHash); ok {
-		changed := false
-		if book.ReadingStatus != "" && existing.ReadestStatus != book.ReadingStatus {
-			existing.ReadestStatus = book.ReadingStatus
-			changed = true
-		}
-		if changed {
-			e.state.SetBook(book.BookHash, existing)
+	if _, ok := e.state.GetBook(book.BookHash); ok {
+		if book.ReadingStatus != "" {
+			e.state.UpdateBook(book.BookHash, func(b *state.BookState) {
+				if b.ReadestStatus != book.ReadingStatus {
+					b.ReadestStatus = book.ReadingStatus
+				}
+			})
 		}
 		return nil
 	}
@@ -452,10 +456,22 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 			if err != nil {
 				return err
 			}
-			userBookID = inserted.ID
-			bs.LastStatusSent = statusID
+			if inserted.ID > 0 {
+				userBookID = inserted.ID
+				bs.LastStatusSent = statusID
+			}
 		}
-		bs.UserBookID = userBookID
+		if userBookID > 0 {
+			bs.UserBookID = userBookID
+		}
+	}
+
+	// If we don't have a valid UserBookID (dry-run), skip Hardcover writes.
+	if userBookID == 0 {
+		e.emit(SyncEvent{Type: "progress_pending", Title: bs.Title, Detail: fmt.Sprintf("would sync %d%%", pct)})
+		bs.ReadestProgress = [2]int{current, total}
+		e.state.SetBook(cfg.BookHash, bs)
+		return nil
 	}
 
 	// Update status via UpdateUserBook if changed.
@@ -487,7 +503,9 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 			if err != nil {
 				return err
 			}
-			bs.UserBookReadID = read.ID
+			if read.ID > 0 {
+				bs.UserBookReadID = read.ID
+			}
 		} else {
 			// Update existing reading session.
 			if _, err := e.updater.UpdateUserBookRead(ctx, bs.UserBookReadID, hardcoverPages, finishedAt); err != nil {
@@ -495,7 +513,9 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 			}
 		}
 
-		bs.LastProgressSent = hardcoverPages
+		if userBookID > 0 {
+			bs.LastProgressSent = hardcoverPages
+		}
 	}
 
 	e.emit(SyncEvent{Type: "progress_synced", Title: bs.Title, Detail: fmt.Sprintf("%d%% → Hardcover", pct)})

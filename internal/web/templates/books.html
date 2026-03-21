@@ -178,6 +178,10 @@
           entry.appendChild(logIcon('\u2713', 'icon-ok'));
           entry.appendChild(document.createTextNode(' Synced \u201c' + (evt.title || '') + '\u201d ' + (evt.detail || '')));
           break;
+        case 'progress_pending':
+          entry.appendChild(logIcon('\u2014', 'icon-dim'));
+          entry.appendChild(document.createTextNode(' \u201c' + (evt.title || '') + '\u201d ' + (evt.detail || '')));
+          break;
         case 'sync_complete':
           entry.className = 'log-separator';
           entry.textContent = '\u2014\u2014 sync complete: ' + (evt.detail || '') + ' \u2014\u2014';
