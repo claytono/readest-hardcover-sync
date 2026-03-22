@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Open book -->
+  <path d="M4 6c0-1 1-2 2-2h8l2 2 2-2h8c1 0 2 1 2 2v16c0 1-1 2-2 2H18l-2 2-2-2H6c-1 0-2-1-2-2V6z" fill="#1e293b" stroke="#60a5fa" stroke-width="1.5"/>
+  <path d="M16 6v18" stroke="#60a5fa" stroke-width="1"/>
+  <!-- Sync arrows -->
+  <path d="M10 20l-2-2 2-2" stroke="#34d399" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="8" y1="18" x2="14" y2="18" stroke="#34d399" stroke-width="1.5" stroke-linecap="round"/>
+  <path d="M22 14l2 2-2 2" stroke="#34d399" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="24" y1="16" x2="18" y2="16" stroke="#34d399" stroke-width="1.5" stroke-linecap="round"/>
+</svg>
