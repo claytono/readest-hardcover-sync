@@ -30,3 +30,36 @@ tasks:
     deps: [build]
     cmds:
       - ./{{.BINARY}} serve
+
+  demo-covers:
+    desc: Download cover images for demo mode from Hardcover
+    cmds:
+      - mkdir -p demo-covers
+      - |
+        while IFS=' ' read -r file url; do
+          if [ ! -f "demo-covers/$file" ]; then
+            curl -sL "$url" -o "demo-covers/$file"
+            size=$(wc -c < "demo-covers/$file" | tr -d ' ')
+            if [ "$size" -lt 1000 ]; then
+              echo "WARNING: $file may be invalid ($size bytes)"
+            else
+              echo "Downloaded $file ($size bytes)"
+            fi
+          fi
+        done <<'EOF'
+        pride-and-prejudice.jpg https://assets.hardcover.app/edition/17099953/d652482fbc1a73c5df99b64160910c99fafa2b94.jpeg
+        moby-dick.jpg https://assets.hardcover.app/edition/32295172/c9f8766e-8705-4057-884b-8331ebe1bd3b.jpg
+        frankenstein.jpg https://assets.hardcover.app/edition/18780509/e353c2cafc8293db69a5771436ffc8a8779c26ab.jpeg
+        dracula.jpg https://assets.hardcover.app/editions/12963649/989255574897903-812-AV3IC3L._SL1500_.jpg
+        a-study-in-scarlet.jpg https://assets.hardcover.app/edition/30399452/b85e6c727c3a4bd19d00735162bf8fff549b0081.jpeg
+        a-tale-of-two-cities.jpg https://assets.hardcover.app/edition/13992502/8493590-L.jpg
+        crime-and-punishment.jpg https://assets.hardcover.app/edition/11223468/295861-L.jpg
+        jane-eyre.jpg https://assets.hardcover.app/external_data/41549656/aa8022ec54a9cd5440302f413ed9deb3b401e318.jpeg
+        EOF
+
+  screenshots:
+    desc: Generate README screenshots from demo mode
+    deps: [demo-covers]
+    cmds:
+      - mkdir -p screenshots
+      - go run ./cmd/screenshot

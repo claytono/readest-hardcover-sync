@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/claytono/readest-hardcover-sync/internal/config"
+	"github.com/claytono/readest-hardcover-sync/internal/demo"
 	"github.com/claytono/readest-hardcover-sync/internal/hardcover"
 	"github.com/claytono/readest-hardcover-sync/internal/identifier"
 	"github.com/claytono/readest-hardcover-sync/internal/readest"
@@ -43,6 +44,8 @@ func main() {
 		runLookup(logger)
 	case "dry-run":
 		runDryRun(logger)
+	case "demo":
+		runDemo(logger)
 	default:
 		printUsage()
 		os.Exit(1)
@@ -58,6 +61,7 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, "  list-readest-books   List all books from Readest")
 	fmt.Fprintln(os.Stderr, "  lookup <slug|isbn>   Look up a book on Hardcover")
 	fmt.Fprintln(os.Stderr, "  dry-run              Run a sync cycle without writing to Hardcover")
+	fmt.Fprintln(os.Stderr, "  demo                 Start a demo server with sample data (no credentials needed)")
 }
 
 // loadConfig loads the config and exits on error.
@@ -376,4 +380,33 @@ func runDryRun(logger *slog.Logger) {
 	}
 
 	fmt.Println("dry run complete")
+}
+
+// runDemo starts a demo server with synthetic data.
+func runDemo(logger *slog.Logger) {
+	fs := flag.NewFlagSet("demo", flag.ExitOnError)
+	listen := fs.String("listen", ":8080", "listen address")
+	covers := fs.String("covers", "demo-covers", "covers directory")
+	_ = fs.Parse(os.Args[2:])
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+
+	server, baseURL, err := demo.StartServer(ctx, logger, *listen, *covers)
+	if err != nil {
+		cancel()
+		logger.Error("demo server failed", "error", err)
+		os.Exit(1)
+	}
+	defer cancel()
+
+	logger.Info("demo server running", "url", baseURL)
+
+	<-ctx.Done()
+	logger.Info("shutting down")
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("shutdown error", "error", err)
+	}
 }

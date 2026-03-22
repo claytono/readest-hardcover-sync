@@ -2,7 +2,7 @@
 
 Syncs reading progress from [Readest](https://readest.com) to [Hardcover.app](https://hardcover.app). One-direction only: Readest → Hardcover.
 
-Each user runs their own instance. The service polls Readest's cloud for book and progress changes, matches them to Hardcover books, and updates your reading status and page progress.
+The service polls Readest's cloud for book and progress changes, matches them to Hardcover books, and updates your reading status and page progress.
 
 ## How it works
 
@@ -87,6 +87,10 @@ Once you're confident the matching is correct, you can switch to automatic mode 
 
 Available at `http://localhost:8080`. Single-page dark-themed interface:
 
+<img src="screenshots/desktop.png" alt="Desktop view — book grid with sidebar showing sync status and log" width="720">
+
+<img src="screenshots/mobile.png" alt="Mobile view — responsive single-column layout" width="240">
+
 - **Sidebar** — sync status, Sync/Resync All buttons, and a real-time sync log
 - **Book grid** — card view with cover images, progress bars, and match badges
 - **Detail modal** — click any card to see identifiers, sync state, and actions (View on Hardcover, Relink, Unlink)
@@ -106,6 +110,7 @@ Cover images are downloaded from Hardcover and cached locally in `COVERS_DIR`.
 | `list-readest-books`   | Pull and display all books from Readest with parsed identifiers        |
 | `lookup <slug\|isbn>`  | Look up a book on Hardcover by slug, ISBN-13, or ISBN-10               |
 | `dry-run`              | Run one sync cycle without writing to Hardcover (uses temporary state) |
+| `demo`                 | Start a demo server with sample data (no credentials needed)           |
 
 ## Book matching
 

@@ -591,6 +591,14 @@ func (h *handlers) handleSidebarStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleTriggerSync triggers a sync in the background and returns updated status.
 func (h *handlers) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		if r.Header.Get("HX-Request") != "" {
+			h.handleSidebarStatus(w, r)
+			return
+		}
+		http.Redirect(w, r, "/books", http.StatusSeeOther)
+		return
+	}
 	h.logger.Info("manual sync triggered")
 	go func() {
 		_ = h.engine.SyncNow(h.ctx)
@@ -605,6 +613,14 @@ func (h *handlers) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 
 // handleFullSync resets sync timestamps and re-pulls everything from Readest.
 func (h *handlers) handleFullSync(w http.ResponseWriter, r *http.Request) {
+	if h.engine == nil {
+		if r.Header.Get("HX-Request") != "" {
+			h.handleSidebarStatus(w, r)
+			return
+		}
+		http.Redirect(w, r, "/books", http.StatusSeeOther)
+		return
+	}
 	h.logger.Info("full sync triggered")
 	go func() {
 		_ = h.engine.FullSync(h.ctx)

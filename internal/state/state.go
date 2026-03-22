@@ -110,6 +110,9 @@ func (s *State) SetLastSyncRanAt(t time.Time) {
 }
 
 func (s *State) Load() error {
+	if s.path == "" {
+		return nil
+	}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -136,6 +139,9 @@ func (s *State) Load() error {
 }
 
 func (s *State) Save() error {
+	if s.path == "" {
+		return nil
+	}
 	s.mu.RLock()
 	ds := diskState{
 		LastBookSync:   s.lastBookSync,

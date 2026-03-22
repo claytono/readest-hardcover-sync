@@ -9,3 +9,5 @@ covers/
 /data/
 node_modules/
 coverage.out
+demo-covers/
+screenshots/
