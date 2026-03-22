@@ -219,6 +219,9 @@
         if (resyncBtn) { resyncBtn.disabled = false; resyncBtn.classList.remove('syncing'); }
         if (indicator) { indicator.style.display = 'none'; }
         if (window._syncTimer) { clearInterval(window._syncTimer); window._syncTimer = null; }
+        // Refresh sidebar status to pick up new timestamps.
+        htmx.trigger('#sidebar-status', 'htmx:abort');
+        htmx.ajax('GET', '/sidebar-status', {target: '#sidebar-status', swap: 'outerHTML'});
       }
     } catch(err) {
       // Ignore parse errors from SSE

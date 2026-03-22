@@ -307,6 +307,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		"updated_books", updatedBooks,
 		"configs_processed", len(configs),
 	)
+	e.state.SetLastSyncRanAt(time.Now())
 	e.emit(SyncEvent{Type: "sync_complete", Detail: fmt.Sprintf("%d matched, %d unmatched", matchedCount, unmatchedCount)})
 	return e.state.Save()
 }
