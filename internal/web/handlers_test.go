@@ -1717,3 +1717,59 @@ func TestHandleLink_WithCoverDownload(t *testing.T) {
 		t.Error("expected series to be set")
 	}
 }
+
+// TestHandleTriggerSync_NilEngine verifies sync gracefully handles nil engine (demo mode).
+func TestHandleTriggerSync_NilEngine(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st)
+	h.engine = nil
+
+	t.Run("htmx returns sidebar status", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/sync", nil)
+		req.Header.Set("HX-Request", "true")
+		rr := httptest.NewRecorder()
+		h.handleTriggerSync(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d", rr.Code)
+		}
+	})
+
+	t.Run("non-htmx redirects", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/sync", nil)
+		rr := httptest.NewRecorder()
+		h.handleTriggerSync(rr, req)
+
+		if rr.Code != http.StatusSeeOther {
+			t.Errorf("expected 303, got %d", rr.Code)
+		}
+	})
+}
+
+// TestHandleFullSync_NilEngine verifies full sync gracefully handles nil engine (demo mode).
+func TestHandleFullSync_NilEngine(t *testing.T) {
+	st := makeState(t)
+	h := newTestHandlers(st)
+	h.engine = nil
+
+	t.Run("htmx returns sidebar status", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/full-sync", nil)
+		req.Header.Set("HX-Request", "true")
+		rr := httptest.NewRecorder()
+		h.handleFullSync(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Errorf("expected 200, got %d", rr.Code)
+		}
+	})
+
+	t.Run("non-htmx redirects", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/full-sync", nil)
+		rr := httptest.NewRecorder()
+		h.handleFullSync(rr, req)
+
+		if rr.Code != http.StatusSeeOther {
+			t.Errorf("expected 303, got %d", rr.Code)
+		}
+	})
+}

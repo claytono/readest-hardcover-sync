@@ -26,6 +26,9 @@ result
 coverage.out
 node_modules/
 
+# Demo covers (downloaded, not committed)
+demo-covers/
+
 # Editor files
 .idea/
 .vscode/

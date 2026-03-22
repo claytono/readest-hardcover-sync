@@ -305,6 +305,17 @@ func TestState_SaveLoadRoundTrip(t *testing.T) {
 	assert.Equal(t, "Book One", b.Title)
 }
 
+func TestState_EmptyPath_LoadSaveNoop(t *testing.T) {
+	s := New("")
+	require.NoError(t, s.Load())
+	s.SetBook("h1", BookState{BookHash: "h1", Title: "In-Memory"})
+	require.NoError(t, s.Save())
+
+	b, ok := s.GetBook("h1")
+	require.True(t, ok)
+	assert.Equal(t, "In-Memory", b.Title)
+}
+
 func TestState_ResetSyncTimestamps(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.json")

@@ -17,6 +17,8 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 - Use `task build` to build the binary
 - Use `task coverage` to check test coverage
 - Use `task run` to build and run the server
+- Use `task demo-covers` to download cover images for demo mode
+- Use `task screenshots` to generate README screenshots from demo mode
 
 ## Rules
 
@@ -31,7 +33,7 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 
 ## Architecture
 
-- Binary requires a subcommand: `serve`, `check-readest-auth`, `check-hardcover-auth`, `list-readest-books`, `lookup`, `dry-run`
+- Binary requires a subcommand: `serve`, `check-readest-auth`, `check-hardcover-auth`, `list-readest-books`, `lookup`, `dry-run`, `demo`
 - Sync engine polls Readest on interval, matches books to Hardcover via identifier fallback chain (slug → ISBN-13 → ISBN-10 → title), pushes status and progress
 - `MANUAL_SYNC=true`: polling still runs (reads from Readest, matches books) but uses a dry-run updater for Hardcover writes. Actual writes only via "Sync Now" in web UI.
 
@@ -57,6 +59,8 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 - Credentials go in `.envrc.local` (gitignored)
 - State persisted in `state.json` (configurable via `STATE_FILE`)
 - Cover images cached in `covers/` directory (configurable via `COVERS_DIR`)
+- Demo cover images downloaded to `demo-covers/` (gitignored, via `task demo-covers`)
+- Generated screenshots in `screenshots/` (committed)
 
 ## Before every commit
 
