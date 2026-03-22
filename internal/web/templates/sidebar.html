@@ -5,8 +5,12 @@
      hx-swap="outerHTML">
   <div class="section-label">Sync Status</div>
   <div class="stat-row">
-    <span class="label">Last sync</span>
+    <span class="label" title="When the sync engine last ran">Last sync</span>
     <span class="value-time">{{.LastSync}}</span>
+  </div>
+  <div class="stat-row">
+    <span class="label" title="When Readest data last changed">Last updated</span>
+    <span class="value-time">{{.LastUpdated}}</span>
   </div>
   <div class="stat-row">
     <span class="label">Matched</span>

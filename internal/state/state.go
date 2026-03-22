@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"sync"
+	"time"
 )
 
 // diskState is the JSON-serializable representation of State.
@@ -18,6 +19,7 @@ type State struct {
 	path           string
 	lastBookSync   int64
 	lastConfigSync int64
+	lastSyncRanAt  time.Time // wall clock of last completed sync; not persisted
 	Books          map[string]BookState
 }
 
@@ -93,6 +95,18 @@ func (s *State) ResetSyncTimestamps() {
 	defer s.mu.Unlock()
 	s.lastBookSync = 0
 	s.lastConfigSync = 0
+}
+
+func (s *State) GetLastSyncRanAt() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.lastSyncRanAt
+}
+
+func (s *State) SetLastSyncRanAt(t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSyncRanAt = t
 }
 
 func (s *State) Load() error {

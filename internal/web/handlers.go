@@ -516,8 +516,38 @@ func (h *handlers) handleUnlink(w http.ResponseWriter, r *http.Request) {
 
 type sidebarStatusData struct {
 	LastSync       string
+	LastUpdated    string
 	MatchedCount   int
 	UnmatchedCount int
+}
+
+func formatTimeAgo(t time.Time) string {
+	if t.IsZero() {
+		return "never"
+	}
+	ago := time.Since(t)
+	switch {
+	case ago < time.Minute:
+		return "just now"
+	case ago < time.Hour:
+		return fmt.Sprintf("%d min ago", int(ago.Minutes()))
+	case ago < 24*time.Hour:
+		hours := int(ago.Hours())
+		if hours == 1 {
+			return "1 hour ago"
+		}
+		return fmt.Sprintf("%d hours ago", hours)
+	case ago < 48*time.Hour:
+		return "yesterday"
+	case ago < 7*24*time.Hour:
+		days := int(ago.Hours() / 24)
+		if days == 1 {
+			return "1 day ago"
+		}
+		return fmt.Sprintf("%d days ago", days)
+	default:
+		return t.UTC().Format("Jan 2, 15:04 UTC")
+	}
 }
 
 func (h *handlers) buildSidebarStatus() sidebarStatusData {
@@ -531,27 +561,20 @@ func (h *handlers) buildSidebarStatus() sidebarStatusData {
 		}
 	}
 
-	lastSync := "never"
+	lastSync := formatTimeAgo(h.state.GetLastSyncRanAt())
+
+	lastUpdated := "never"
 	ts := h.state.GetLastBookSync()
 	if configTS := h.state.GetLastConfigSync(); configTS > ts {
 		ts = configTS
 	}
 	if ts > 0 {
-		ago := time.Since(time.UnixMilli(ts))
-		switch {
-		case ago < time.Minute:
-			lastSync = "just now"
-		case ago < time.Hour:
-			lastSync = fmt.Sprintf("%d min ago", int(ago.Minutes()))
-		case ago < 24*time.Hour:
-			lastSync = fmt.Sprintf("%d hours ago", int(ago.Hours()))
-		default:
-			lastSync = time.UnixMilli(ts).UTC().Format("Jan 2, 15:04 UTC")
-		}
+		lastUpdated = formatTimeAgo(time.UnixMilli(ts))
 	}
 
 	return sidebarStatusData{
 		LastSync:       lastSync,
+		LastUpdated:    lastUpdated,
 		MatchedCount:   matched,
 		UnmatchedCount: unmatched,
 	}

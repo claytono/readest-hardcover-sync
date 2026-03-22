@@ -725,6 +725,7 @@ func TestHandleSidebarStatus_WithBooks(t *testing.T) {
 	// Set non-zero sync timestamps.
 	st.SetLastBookSync(time.Now().UnixMilli())
 	st.SetLastConfigSync(time.Now().UnixMilli())
+	st.SetLastSyncRanAt(time.Now())
 
 	h := newTestHandlers(st)
 
@@ -1581,8 +1582,11 @@ func TestHandleSidebarStatus_RelativeTime(t *testing.T) {
 	}{
 		{"just now", 30 * time.Second, "just now"},
 		{"minutes ago", 5 * time.Minute, "min ago"},
+		{"1 hour ago", 1*time.Hour + 30*time.Minute, "1 hour ago"},
 		{"hours ago", 3 * time.Hour, "hours ago"},
-		{"old date", 48 * time.Hour, "UTC"},
+		{"yesterday", 30 * time.Hour, "yesterday"},
+		{"days ago", 4 * 24 * time.Hour, "days ago"},
+		{"old date", 8 * 24 * time.Hour, "UTC"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
