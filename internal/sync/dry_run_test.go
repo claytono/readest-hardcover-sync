@@ -154,6 +154,6 @@ func TestDryRun_GetStatuses_PassThrough(t *testing.T) {
 	got, err := dru.GetStatuses(context.Background())
 	require.NoError(t, err)
 	require.NotEmpty(t, got, "GetStatuses should return statuses from the real implementation")
-	// The mock returns 3 statuses.
-	assert.Len(t, got, 3)
+	// The mock returns all 6 Hardcover statuses.
+	assert.Len(t, got, 6)
 }

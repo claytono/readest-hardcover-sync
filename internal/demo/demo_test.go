@@ -162,7 +162,7 @@ func TestDemoUpdater(t *testing.T) {
 
 	statuses, err := u.GetStatuses(ctx)
 	require.NoError(t, err)
-	assert.Len(t, statuses, 5)
+	assert.Len(t, statuses, 6)
 
 	ub, err := u.GetUserBook(ctx, 1)
 	require.NoError(t, err)

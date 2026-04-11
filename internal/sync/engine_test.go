@@ -132,9 +132,12 @@ func (m *mockProgressUpdater) GetStatuses(_ context.Context) ([]hardcover.BookSt
 		return nil, m.statusesErr
 	}
 	return []hardcover.BookStatus{
-		{ID: 1, Status: "Want to Read"},
-		{ID: 2, Status: "Currently Reading"},
-		{ID: 3, Status: "Read"},
+		{ID: hardcover.StatusWantToRead, Status: "Want to Read"},
+		{ID: hardcover.StatusCurrentlyReading, Status: "Currently Reading"},
+		{ID: hardcover.StatusRead, Status: "Read"},
+		{ID: hardcover.StatusPaused, Status: "Paused"},
+		{ID: hardcover.StatusDidNotFinish, Status: "Did Not Finish"},
+		{ID: hardcover.StatusIgnored, Status: "Ignored"},
 	}, nil
 }
 
@@ -1744,4 +1747,42 @@ func TestEngine_TimestampFromRecords(t *testing.T) {
 	// Should NOT be zero and should NOT be wall clock (much larger value).
 	assert.Greater(t, st.GetLastBookSync(), int64(0))
 	assert.Less(t, st.GetLastBookSync(), int64(2000000000000)) // not a wall clock time from ~2033+
+}
+
+// TestEngine_BlockedTransition_DNF: Book marked as DNF on Hardcover should not
+// be overwritten by a reading status from Readest.
+func TestEngine_BlockedTransition_DNF(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash: "hashDNF",
+				Progress: "[100,400]",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashDNF", state.BookState{
+		BookHash:        "hashDNF",
+		Title:           "DNF Book",
+		HardcoverBookID: 999,
+		EditionID:       99,
+		EditionPages:    400,
+		UserBookID:      50,
+		LastStatusSent:  hardcover.StatusDidNotFinish,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	// Status should remain DNF — no update calls.
+	bs, _ := st.GetBook("hashDNF")
+	assert.Equal(t, hardcover.StatusDidNotFinish, bs.LastStatusSent, "DNF status should not be overwritten")
+	assert.Empty(t, updater.updateUserBookCalls, "no UpdateUserBook calls expected")
+	assert.Empty(t, updater.insertUserReadCalls, "no InsertUserBookRead calls expected")
 }
