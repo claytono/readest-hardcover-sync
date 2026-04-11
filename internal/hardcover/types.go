@@ -117,4 +117,18 @@ type BookStatus struct {
 	Status string `json:"status"`
 }
 
+// StatusNone indicates a book has no Hardcover status yet (not a real Hardcover
+// status — used internally to represent the absence of a status).
+const StatusNone = 0
+
+// Book status IDs from Hardcover's user_book_statuses table.
+const (
+	StatusWantToRead       = 1
+	StatusCurrentlyReading = 2
+	StatusRead             = 3
+	StatusPaused           = 4
+	StatusDidNotFinish     = 5
+	StatusIgnored          = 6
+)
+
 const ReadingFormatEBook = 4

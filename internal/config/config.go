@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -16,6 +17,8 @@ type Config struct {
 	CoversDir        string
 	EnableTitleMatch bool
 	ManualSync       bool
+	MinSyncPercent   float64 // minimum progress % before syncing (default 2)
+	MinSyncPages     int     // minimum Readest pages before syncing (default 5)
 }
 
 func Load() (*Config, error) {
@@ -29,6 +32,8 @@ func Load() (*Config, error) {
 		CoversDir:        "covers",
 		EnableTitleMatch: os.Getenv("ENABLE_TITLE_MATCH") == "true",
 		ManualSync:       os.Getenv("MANUAL_SYNC") == "true",
+		MinSyncPercent:   2,
+		MinSyncPages:     5,
 	}
 
 	if v := os.Getenv("SYNC_INTERVAL"); v != "" {
@@ -46,6 +51,26 @@ func Load() (*Config, error) {
 	}
 	if v := os.Getenv("COVERS_DIR"); v != "" {
 		cfg.CoversDir = v
+	}
+	if v := os.Getenv("MIN_SYNC_PERCENT"); v != "" {
+		f, err := strconv.ParseFloat(v, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MIN_SYNC_PERCENT: %w", err)
+		}
+		if f < 0 || f > 100 {
+			return nil, fmt.Errorf("invalid MIN_SYNC_PERCENT: must be between 0 and 100")
+		}
+		cfg.MinSyncPercent = f
+	}
+	if v := os.Getenv("MIN_SYNC_PAGES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid MIN_SYNC_PAGES: %w", err)
+		}
+		if n < 0 {
+			return nil, fmt.Errorf("invalid MIN_SYNC_PAGES: must be >= 0")
+		}
+		cfg.MinSyncPages = n
 	}
 
 	return cfg, nil

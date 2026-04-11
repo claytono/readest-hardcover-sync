@@ -31,6 +31,8 @@ The service polls Readest's cloud for book and progress changes, matches them to
 | `ENABLE_TITLE_MATCH` | no       | `false`      | Allow matching books by title search (may produce false matches)                                |
 | `MANUAL_SYNC`        | no       | `false`      | If true, poll and match books but don't write to Hardcover until you click "Sync" in the web UI |
 | `COVERS_DIR`         | no       | `covers`     | Directory for cached book cover images                                                          |
+| `MIN_SYNC_PERCENT`   | no       | `2`          | Minimum progress % before syncing a book as "currently reading"                                 |
+| `MIN_SYNC_PAGES`     | no       | `5`          | Minimum Readest pages before syncing (whichever threshold is met first)                         |
 
 ### Local development
 

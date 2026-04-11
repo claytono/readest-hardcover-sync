@@ -117,8 +117,10 @@ func runServer(logger *slog.Logger) {
 	matcher := syncsvc.NewMatcher(hardcoverClient, cfg.EnableTitleMatch)
 	events := syncsvc.NewEventBus(200)
 	engine := syncsvc.NewEngine(readestClient, hardcoverClient, hardcoverClient, st, matcher, logger, cfg.ManualSync, &syncsvc.EngineOptions{
-		Events:    events,
-		CoversDir: cfg.CoversDir,
+		Events:         events,
+		CoversDir:      cfg.CoversDir,
+		MinSyncPercent: cfg.MinSyncPercent,
+		MinSyncPages:   cfg.MinSyncPages,
 	})
 
 	go engine.Run(ctx, cfg.SyncInterval)
@@ -369,7 +371,10 @@ func runDryRun(logger *slog.Logger) {
 
 	dryRunUpdater := syncsvc.NewDryRunUpdater(hardcoverClient, logger)
 	matcher := syncsvc.NewMatcher(hardcoverClient, cfg.EnableTitleMatch)
-	engine := syncsvc.NewEngine(readestClient, hardcoverClient, dryRunUpdater, st, matcher, logger, false, nil)
+	engine := syncsvc.NewEngine(readestClient, hardcoverClient, dryRunUpdater, st, matcher, logger, false, &syncsvc.EngineOptions{
+		MinSyncPercent: cfg.MinSyncPercent,
+		MinSyncPages:   cfg.MinSyncPages,
+	})
 
 	ctx := context.Background()
 	tickErr := engine.Tick(ctx)

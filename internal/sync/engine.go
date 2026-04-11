@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/claytono/readest-hardcover-sync/internal/hardcover"
 	"github.com/claytono/readest-hardcover-sync/internal/identifier"
 	"github.com/claytono/readest-hardcover-sync/internal/readest"
 	"github.com/claytono/readest-hardcover-sync/internal/state"
@@ -30,14 +31,19 @@ type Engine struct {
 
 	manualSync bool // true = dry-run updater for polling, real updater for SyncNow
 
+	minSyncPercent float64 // minimum progress % before syncing as "currently reading"
+	minSyncPages   int     // minimum Readest pages before syncing as "currently reading"
+
 	privacySettingID int            // fetched from Hardcover on first sync
 	statusNames      map[int]string // fetched from Hardcover on first sync
 }
 
 // EngineOptions holds optional dependencies for NewEngine.
 type EngineOptions struct {
-	Events    *EventBus
-	CoversDir string
+	Events         *EventBus
+	CoversDir      string
+	MinSyncPercent float64 // minimum progress % before syncing (0 = no threshold)
+	MinSyncPages   int     // minimum Readest pages before syncing (0 = no threshold)
 }
 
 // NewEngine constructs an Engine with the given dependencies.
@@ -57,6 +63,8 @@ func NewEngine(readest ReadestPuller, finder BookFinder, updater ProgressUpdater
 	if opts != nil {
 		e.events = opts.Events
 		e.coversDir = opts.CoversDir
+		e.minSyncPercent = opts.MinSyncPercent
+		e.minSyncPages = opts.MinSyncPages
 	}
 	if manualSync {
 		e.manualSync = true
@@ -222,7 +230,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		if bs.HardcoverBookID == 0 {
 			continue
 		}
-		if bs.LastStatusSent != 0 || bs.LastProgressSent != 0 {
+		if bs.LastStatusSent != hardcover.StatusNone || bs.LastProgressSent != 0 {
 			continue
 		}
 		if bs.ReadestProgress[0] == 0 && bs.ReadestProgress[1] == 0 && bs.ReadestStatus == "" {
@@ -402,9 +410,10 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 		return nil
 	}
 
-	// DeriveStatus; skip if 0.
-	statusID := DeriveStatus(current, total, bs.ReadestStatus)
-	if statusID == 0 {
+	// DeriveStatus; skip if no status update needed.
+	statusID := DeriveStatus(current, total, bs.ReadestStatus, e.minSyncPercent, e.minSyncPages)
+	if statusID == hardcover.StatusNone {
+		e.state.SetBook(cfg.BookHash, bs)
 		return nil
 	}
 
@@ -452,6 +461,10 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 
 		if existing != nil {
 			userBookID = existing.ID
+			// Sync our record of the Hardcover status so transition checks work.
+			if existing.StatusID != 0 {
+				bs.LastStatusSent = existing.StatusID
+			}
 		} else {
 			inserted, err := e.updater.InsertUserBook(ctx, bs.HardcoverBookID, statusID, e.privacySettingID, editionIDPtr)
 			if err != nil {
@@ -475,6 +488,19 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 		return nil
 	}
 
+	// Only allow forward status transitions (want-to-read → reading → read).
+	// If the book is in a state like DNF, don't overwrite it.
+	if statusID != bs.LastStatusSent && !IsAllowedTransition(bs.LastStatusSent, statusID) {
+		e.logger.Info("skipping status update: transition not allowed",
+			"title", bs.Title,
+			"current_status", e.statusName(bs.LastStatusSent),
+			"desired_status", e.statusName(statusID),
+		)
+		bs.ReadestProgress = [2]int{current, total}
+		e.state.SetBook(cfg.BookHash, bs)
+		return nil
+	}
+
 	// Update status via UpdateUserBook if changed.
 	if statusID != bs.LastStatusSent {
 		if _, err := e.updater.UpdateUserBook(ctx, userBookID, statusID); err != nil {
@@ -486,7 +512,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 	// Update progress.
 	if hardcoverPages != bs.LastProgressSent && bs.EditionPages > 0 {
 		var finishedAt *string
-		if statusID == 3 {
+		if statusID == hardcover.StatusRead {
 			today := time.Now().Format("2006-01-02")
 			finishedAt = &today
 		}

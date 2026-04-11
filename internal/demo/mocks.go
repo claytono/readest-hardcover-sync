@@ -94,8 +94,9 @@ func (d *demoUpdater) GetStatuses(_ context.Context) ([]hardcover.BookStatus, er
 		{ID: 1, Status: "Want to Read"},
 		{ID: 2, Status: "Currently Reading"},
 		{ID: 3, Status: "Read"},
-		{ID: 4, Status: "Did Not Finish"},
-		{ID: 5, Status: "Not Set"},
+		{ID: 4, Status: "Paused"},
+		{ID: 5, Status: "Did Not Finish"},
+		{ID: 6, Status: "Ignored"},
 	}, nil
 }
 
