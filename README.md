@@ -54,6 +54,9 @@ EOF
 go run ./cmd/readest-hardcover-sync check-readest-auth
 go run ./cmd/readest-hardcover-sync check-hardcover-auth
 
+# Optional: verify Hardcover search API response shape when HARDCOVER_TOKEN is set
+go test ./internal/hardcover -run LiveContract -count=1 -v
+
 # Start the server in manual sync mode
 MANUAL_SYNC=true go run ./cmd/readest-hardcover-sync serve
 ```

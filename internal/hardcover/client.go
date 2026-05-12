@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -197,18 +196,7 @@ func (c *Client) SearchBooks(ctx context.Context, query string) ([]Book, error) 
 	var booksData struct {
 		Books []Book `json:"books"`
 	}
-	ids := make([]int, 0, len(searchData.Search.IDs))
-	for _, s := range searchData.Search.IDs {
-		id, err := strconv.Atoi(s)
-		if err != nil {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	if err := c.do(ctx, queryBooksByIDs, map[string]any{"ids": ids}, &booksData); err != nil {
+	if err := c.do(ctx, queryBooksByIDs, map[string]any{"ids": searchData.Search.IDs}, &booksData); err != nil {
 		return nil, err
 	}
 	return booksData.Books, nil
