@@ -79,8 +79,9 @@ type insertUserBookCall struct {
 }
 
 type updateUserBookCall struct {
-	id       int
-	statusID int
+	id        int
+	statusID  int
+	editionID *int
 }
 
 type insertUserBookReadCall struct {
@@ -161,15 +162,15 @@ func (m *mockProgressUpdater) InsertUserBook(_ context.Context, bookID, statusID
 	return &hardcover.UserBook{ID: 99, BookID: bookID, StatusID: statusID}, nil
 }
 
-func (m *mockProgressUpdater) UpdateUserBook(_ context.Context, id, statusID int) (*hardcover.UserBook, error) {
-	m.updateUserBookCalls = append(m.updateUserBookCalls, updateUserBookCall{id: id, statusID: statusID})
+func (m *mockProgressUpdater) UpdateUserBook(_ context.Context, id, statusID int, editionID *int) (*hardcover.UserBook, error) {
+	m.updateUserBookCalls = append(m.updateUserBookCalls, updateUserBookCall{id: id, statusID: statusID, editionID: editionID})
 	if m.updateUserBookErr != nil {
 		return nil, m.updateUserBookErr
 	}
 	if m.updatedUserBook != nil {
 		return m.updatedUserBook, nil
 	}
-	return &hardcover.UserBook{ID: id, StatusID: statusID}, nil
+	return &hardcover.UserBook{ID: id, StatusID: statusID, EditionID: editionID}, nil
 }
 
 func (m *mockProgressUpdater) InsertUserBookRead(_ context.Context, userBookID, progressPages int, editionID *int, startedAt string, finishedAt *string) (*hardcover.UserBookRead, error) {
@@ -718,6 +719,42 @@ func TestEngine_SyncNow(t *testing.T) {
 
 	// After SyncNow completes, updater should be restored to dry-run.
 	assert.NotEqual(t, realUpdater, engine.updater, "updater should be restored to dry-run after SyncNow")
+}
+
+func TestEngine_SyncNow_DoesNotMutateSharedUpdater(t *testing.T) {
+	blocker := make(chan struct{})
+	entered := make(chan struct{}, 1)
+	puller := &blockingPuller{ready: blocker, entered: entered}
+	finder := &mockBookFinder{}
+	realUpdater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	matcher := NewMatcher(finder, false)
+	logger := newNopLogger()
+
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true, nil)
+	dryRunUpdater := engine.updater
+
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.SyncNow(context.Background())
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("SyncNow did not enter PullBooks")
+	}
+
+	assert.Equal(t, dryRunUpdater, engine.updater, "SyncNow must not swap the shared updater while running")
+
+	close(blocker)
+	require.NoError(t, <-done)
 }
 
 // TestEngine_FullSync resets timestamps and uses real updater.
@@ -1608,6 +1645,185 @@ func TestEngine_ProcessConfig_ExistingUserBook(t *testing.T) {
 	// The existing user book ID should be used for the read.
 	require.Len(t, updater.insertUserReadCalls, 1)
 	assert.Equal(t, 55, updater.insertUserReadCalls[0].userBookID)
+}
+
+func TestEngine_ProcessConfig_UsesExistingReadForLinkedEdition(t *testing.T) {
+	editionID := 80
+	existingUserBook := &hardcover.UserBook{
+		ID:       55,
+		BookID:   800,
+		StatusID: hardcover.StatusWantToRead,
+		UserBookReads: []hardcover.UserBookRead{
+			{ID: 123, EditionID: &editionID},
+		},
+	}
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashExistingRead",
+				Progress:  "[100,400]",
+				UpdatedAt: "2024-03-02T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		userBook:   existingUserBook,
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashExistingRead", state.BookState{
+		BookHash:        "hashExistingRead",
+		Title:           "Existing Read Book",
+		HardcoverBookID: 800,
+		EditionID:       editionID,
+		EditionPages:    400,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	assert.Empty(t, updater.insertUserReadCalls, "existing edition-specific read should be updated, not duplicated")
+	require.Len(t, updater.updateUserReadCalls, 1)
+	assert.Equal(t, 123, updater.updateUserReadCalls[0].id)
+	assert.Equal(t, 100, updater.updateUserReadCalls[0].progressPages)
+
+	require.Len(t, updater.updateUserBookCalls, 1)
+	assert.Equal(t, hardcover.StatusCurrentlyReading, updater.updateUserBookCalls[0].statusID)
+	require.NotNil(t, updater.updateUserBookCalls[0].editionID)
+	assert.Equal(t, editionID, *updater.updateUserBookCalls[0].editionID)
+
+	bs, ok := st.GetBook("hashExistingRead")
+	require.True(t, ok)
+	assert.Equal(t, 123, bs.UserBookReadID)
+	assert.Equal(t, 100, bs.LastProgressSent)
+}
+
+func TestEngine_ProcessConfig_ReplacesStaleReadWithLinkedEditionRead(t *testing.T) {
+	editionID := 80
+	staleProgress := 64
+	existingUserBook := &hardcover.UserBook{
+		ID:        55,
+		BookID:    800,
+		StatusID:  hardcover.StatusCurrentlyReading,
+		EditionID: &editionID,
+		UserBookReads: []hardcover.UserBookRead{
+			{ID: 5311406, ProgressPages: &staleProgress},
+			{ID: 5311405, EditionID: &editionID},
+		},
+	}
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashStaleRead",
+				Progress:  "[80,400]",
+				UpdatedAt: "2024-03-02T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		userBook:   existingUserBook,
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashStaleRead", state.BookState{
+		BookHash:         "hashStaleRead",
+		Title:            "Stale Read Book",
+		HardcoverBookID:  800,
+		EditionID:        editionID,
+		EditionPages:     400,
+		UserBookID:       55,
+		UserBookReadID:   5311406,
+		LastStatusSent:   hardcover.StatusCurrentlyReading,
+		LastProgressSent: staleProgress,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	assert.Empty(t, updater.insertUserReadCalls, "stale editionless read should not be duplicated")
+	require.Len(t, updater.updateUserReadCalls, 1)
+	assert.Equal(t, 5311405, updater.updateUserReadCalls[0].id)
+	assert.Equal(t, 80, updater.updateUserReadCalls[0].progressPages)
+
+	bs, ok := st.GetBook("hashStaleRead")
+	require.True(t, ok)
+	assert.Equal(t, 5311405, bs.UserBookReadID)
+	assert.Equal(t, 80, bs.LastProgressSent)
+}
+
+func TestSelectUserBookRead(t *testing.T) {
+	editionID := 80
+	otherEditionID := 81
+	progressPages := 10
+
+	tests := []struct {
+		name          string
+		reads         []hardcover.UserBookRead
+		editionID     int
+		currentReadID int
+		wantID        int
+		wantOK        bool
+	}{
+		{
+			name:      "matching edition wins",
+			editionID: editionID,
+			reads: []hardcover.UserBookRead{
+				{ID: 1},
+				{ID: 2, EditionID: &editionID},
+			},
+			wantID: 2,
+			wantOK: true,
+		},
+		{
+			name:          "current read used when no edition match",
+			editionID:     editionID,
+			currentReadID: 3,
+			reads: []hardcover.UserBookRead{
+				{ID: 3, EditionID: &otherEditionID},
+				{ID: 4},
+			},
+			wantID: 3,
+			wantOK: true,
+		},
+		{
+			name:      "editionless read fallback",
+			editionID: editionID,
+			reads: []hardcover.UserBookRead{
+				{ID: 5, EditionID: &otherEditionID},
+				{ID: 6, ProgressPages: &progressPages},
+			},
+			wantID: 6,
+			wantOK: true,
+		},
+		{
+			name:      "any read fallback",
+			editionID: editionID,
+			reads: []hardcover.UserBookRead{
+				{ID: 7, EditionID: &otherEditionID},
+			},
+			wantID: 7,
+			wantOK: true,
+		},
+		{
+			name:   "no valid read",
+			reads:  []hardcover.UserBookRead{{ID: 0}},
+			wantOK: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := selectUserBookRead(tt.reads, tt.editionID, tt.currentReadID)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantID, got.ID)
+		})
+	}
 }
 
 // TestEngine_ProcessConfig_GetUserBook_Error: GetUserBook returns error — processConfig

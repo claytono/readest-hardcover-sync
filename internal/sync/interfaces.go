@@ -27,7 +27,7 @@ type ProgressUpdater interface {
 	GetStatuses(ctx context.Context) ([]hardcover.BookStatus, error)
 	GetUserBook(ctx context.Context, bookID int) (*hardcover.UserBook, error)
 	InsertUserBook(ctx context.Context, bookID, statusID, privacySettingID int, editionID *int) (*hardcover.UserBook, error)
-	UpdateUserBook(ctx context.Context, id int, statusID int) (*hardcover.UserBook, error)
+	UpdateUserBook(ctx context.Context, id int, statusID int, editionID *int) (*hardcover.UserBook, error)
 	InsertUserBookRead(ctx context.Context, userBookID, progressPages int, editionID *int, startedAt string, finishedAt *string) (*hardcover.UserBookRead, error)
 	UpdateUserBookRead(ctx context.Context, id int, progressPages int, finishedAt *string) (*hardcover.UserBookRead, error)
 }

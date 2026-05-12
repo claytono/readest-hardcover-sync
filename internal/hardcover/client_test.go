@@ -605,14 +605,18 @@ func TestClient_UpdateUserBook(t *testing.T) {
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 		assert.Equal(t, float64(10), body.Variables["id"])
+		object := body.Variables["object"].(map[string]any)
+		assert.Equal(t, float64(3), object["status_id"])
+		assert.Equal(t, float64(77), object["edition_id"])
 
 		data := map[string]any{
 			"update_user_book": map[string]any{
 				"error": nil,
 				"user_book": map[string]any{
-					"id":        10,
-					"book_id":   42,
-					"status_id": 3,
+					"id":         10,
+					"book_id":    42,
+					"status_id":  3,
+					"edition_id": 77,
 				},
 			},
 		}
@@ -621,11 +625,14 @@ func TestClient_UpdateUserBook(t *testing.T) {
 	}
 
 	c := newTestClient(t, handler)
-	ub, err := c.UpdateUserBook(context.Background(), 10, 3)
+	editionID := 77
+	ub, err := c.UpdateUserBook(context.Background(), 10, 3, &editionID)
 	require.NoError(t, err)
 	require.NotNil(t, ub)
 	assert.Equal(t, 10, ub.ID)
 	assert.Equal(t, 3, ub.StatusID)
+	require.NotNil(t, ub.EditionID)
+	assert.Equal(t, editionID, *ub.EditionID)
 }
 
 func TestClient_UpdateUserBook_Error(t *testing.T) {
@@ -642,7 +649,7 @@ func TestClient_UpdateUserBook_Error(t *testing.T) {
 	}
 
 	c := newTestClient(t, handler)
-	ub, err := c.UpdateUserBook(context.Background(), 999, 3)
+	ub, err := c.UpdateUserBook(context.Background(), 999, 3, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "record not found")
 	assert.Nil(t, ub)
@@ -884,7 +891,7 @@ func TestClient_UpdateUserBook_NetworkError(t *testing.T) {
 	c := hardcover.NewClient("test-token")
 	c.SetBaseURL("http://127.0.0.1:0")
 	c.SetLimiter(rate.NewLimiter(rate.Inf, 100))
-	_, err := c.UpdateUserBook(context.Background(), 10, 3)
+	_, err := c.UpdateUserBook(context.Background(), 10, 3, nil)
 	require.Error(t, err)
 }
 

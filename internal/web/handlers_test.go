@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -63,8 +62,8 @@ func (s *stubUpdater) GetUserBook(_ context.Context, _ int) (*hardcover.UserBook
 func (s *stubUpdater) InsertUserBook(_ context.Context, bookID, statusID, privacySettingID int, editionID *int) (*hardcover.UserBook, error) {
 	return &hardcover.UserBook{ID: 1, BookID: bookID, StatusID: statusID}, nil
 }
-func (s *stubUpdater) UpdateUserBook(_ context.Context, id int, statusID int) (*hardcover.UserBook, error) {
-	return &hardcover.UserBook{ID: id, StatusID: statusID}, nil
+func (s *stubUpdater) UpdateUserBook(_ context.Context, id int, statusID int, editionID *int) (*hardcover.UserBook, error) {
+	return &hardcover.UserBook{ID: id, StatusID: statusID, EditionID: editionID}, nil
 }
 func (s *stubUpdater) InsertUserBookRead(_ context.Context, userBookID, progressPages int, editionID *int, startedAt string, finishedAt *string) (*hardcover.UserBookRead, error) {
 	return &hardcover.UserBookRead{ID: 1}, nil
@@ -177,12 +176,20 @@ func TestHandleBooks(t *testing.T) {
 
 // TestHandleLink verifies that POSTing link form values updates the state.
 func TestHandleLink(t *testing.T) {
-	st := makeState(t)
+	tmpDir, err := os.MkdirTemp("", "link-sync-test-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(tmpDir) }()
+
+	st := state.New(tmpDir + "/state.json")
 	st.SetBook("abc123", state.BookState{
-		BookHash:  "abc123",
-		Title:     "Test Book",
-		Author:    "Test Author",
-		Unmatched: true,
+		BookHash:        "abc123",
+		Title:           "Test Book",
+		Author:          "Test Author",
+		ReadestProgress: [2]int{100, 200},
+		ReadestStatus:   "reading",
+		Unmatched:       true,
 	})
 
 	h := newTestHandlers(st)
@@ -223,6 +230,22 @@ func TestHandleLink(t *testing.T) {
 	}
 	if book.MatchMethod != "manual" {
 		t.Errorf("expected MatchMethod=manual, got %q", book.MatchMethod)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		book, _ = st.GetBook("abc123")
+		if book.LastStatusSent != 0 && book.LastProgressSent != 0 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	book, _ = st.GetBook("abc123")
+	if book.LastStatusSent == 0 {
+		t.Error("expected scheduled sync to send status after link")
+	}
+	if book.LastProgressSent != 160 {
+		t.Errorf("expected scheduled sync to send 160 Hardcover pages, got %d", book.LastProgressSent)
 	}
 }
 
@@ -912,6 +935,7 @@ func TestHandleLink_InvalidBookID(t *testing.T) {
 func TestHandleLink_NewBookCreated(t *testing.T) {
 	st := makeState(t)
 	h := newTestHandlers(st)
+	h.engine = nil
 
 	form := url.Values{"book_id": {"99"}, "slug": {"new-book"}}
 	req := httptest.NewRequest(http.MethodPost, "/books/newbook/link",
@@ -1065,7 +1089,7 @@ func TestHandleTriggerSync(t *testing.T) {
 		if _, err := os.Stat(stateFile); err == nil {
 			return
 		}
-		runtime.Gosched()
+		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("background SyncNow goroutine did not complete within timeout")
 }
@@ -1127,7 +1151,7 @@ func TestHandleFullSync(t *testing.T) {
 		if _, err := os.Stat(stateFile); err == nil {
 			return
 		}
-		runtime.Gosched()
+		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("background FullSync goroutine did not complete within timeout")
 }
@@ -1659,16 +1683,6 @@ func TestHandleLink_WithCoverDownload(t *testing.T) {
 	}
 	updater := &stubUpdater{}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	engine := syncsvc.NewEngine(
-		&stubReadest{},
-		finder,
-		updater,
-		st,
-		syncsvc.NewMatcher(finder, false),
-		logger,
-		false,
-		nil,
-	)
 	statuses, _ := updater.GetStatuses(context.Background())
 	statusNames := make(map[int]string, len(statuses))
 	for _, s := range statuses {
@@ -1678,7 +1692,7 @@ func TestHandleLink_WithCoverDownload(t *testing.T) {
 		state:       st,
 		finder:      finder,
 		updater:     updater,
-		engine:      engine,
+		engine:      nil,
 		ctx:         context.Background(),
 		coversDir:   t.TempDir(),
 		statusNames: statusNames,
