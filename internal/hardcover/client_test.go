@@ -1,10 +1,14 @@
 package hardcover_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +39,41 @@ func newTestClient(t *testing.T, handler http.HandlerFunc) *hardcover.Client {
 	// Use a very permissive limiter so tests don't wait on the default limiter.
 	c.SetLimiter(rate.NewLimiter(rate.Inf, 100))
 	return c
+}
+
+func doLiveGraphQL(t *testing.T, token string, query string, vars map[string]any, result any) {
+	t.Helper()
+
+	body, err := json.Marshal(map[string]any{
+		"query":     query,
+		"variables": vars,
+	})
+	require.NoError(t, err)
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, "https://api.hardcover.app/v1/graphql", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	token = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(token), "Bearer "))
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var gqlResp struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+		Error string `json:"error"`
+	}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&gqlResp))
+	require.Empty(t, gqlResp.Error)
+	if len(gqlResp.Errors) > 0 {
+		require.Fail(t, fmt.Sprintf("GraphQL error: %s", gqlResp.Errors[0].Message))
+	}
+	require.NoError(t, json.Unmarshal(gqlResp.Data, result))
 }
 
 func TestClient_FindBookBySlug(t *testing.T) {
@@ -412,7 +451,7 @@ func TestClient_SearchBooks_Empty(t *testing.T) {
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		data := map[string]any{
 			"search": map[string]any{
-				"ids": []string{},
+				"ids": []int{},
 			},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -425,24 +464,7 @@ func TestClient_SearchBooks_Empty(t *testing.T) {
 	assert.Nil(t, books)
 }
 
-func TestClient_SearchBooks_NonNumericIDs(t *testing.T) {
-	handler := func(w http.ResponseWriter, r *http.Request) {
-		data := map[string]any{
-			"search": map[string]any{
-				"ids": []string{"not-a-number", "also-bad"},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(gqlResponse(t, data))
-	}
-
-	c := newTestClient(t, handler)
-	books, err := c.SearchBooks(context.Background(), "something")
-	require.NoError(t, err)
-	assert.Nil(t, books)
-}
-
-func TestClient_SearchBooks_Success(t *testing.T) {
+func TestClient_SearchBooks_NumericIDs(t *testing.T) {
 	callCount := 0
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		callCount++
@@ -458,7 +480,7 @@ func TestClient_SearchBooks_Success(t *testing.T) {
 			// First call: search query returns IDs.
 			data := map[string]any{
 				"search": map[string]any{
-					"ids": []string{"101", "102"},
+					"ids": []int{101, 102},
 				},
 			}
 			_, _ = w.Write(gqlResponse(t, data))
@@ -482,6 +504,33 @@ func TestClient_SearchBooks_Success(t *testing.T) {
 	assert.Equal(t, 101, books[0].ID)
 	assert.Equal(t, "book-one", books[0].Slug)
 	assert.Equal(t, 102, books[1].ID)
+}
+
+func TestClient_SearchBooks_LiveContract(t *testing.T) {
+	token := os.Getenv("HARDCOVER_TOKEN")
+	if token == "" {
+		t.Skip("HARDCOVER_TOKEN is not set; skipping live Hardcover contract test")
+	}
+
+	var bookData struct {
+		Books []struct {
+			Title string `json:"title"`
+		} `json:"books"`
+	}
+	doLiveGraphQL(t, token, `query LiveContractBook {
+  books(limit: 1, where: { title: { _is_null: false } }, order_by: { id: asc }) { title }
+}`, nil, &bookData)
+	require.NotEmpty(t, bookData.Books)
+	require.NotEmpty(t, bookData.Books[0].Title)
+
+	var searchData struct {
+		Search hardcover.SearchResult `json:"search"`
+	}
+	doLiveGraphQL(t, token, `query SearchBooks($query: String!) {
+  search(query: $query, query_type: "Book", per_page: 5, page: 1) { ids }
+}`, map[string]any{"query": bookData.Books[0].Title}, &searchData)
+	require.NotEmpty(t, searchData.Search.IDs)
+	assert.NotZero(t, searchData.Search.IDs[0])
 }
 
 func TestClient_GetUserBook(t *testing.T) {
@@ -864,7 +913,7 @@ func TestClient_SearchBooks_HydrationError(t *testing.T) {
 		if callCount == 1 {
 			// Search returns valid IDs.
 			data := map[string]any{
-				"search": map[string]any{"ids": []string{"101"}},
+				"search": map[string]any{"ids": []int{101}},
 			}
 			_, _ = w.Write(gqlResponse(t, data))
 		} else {

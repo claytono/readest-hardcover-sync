@@ -109,7 +109,7 @@ type MeResponse struct {
 }
 
 type SearchResult struct {
-	IDs []string `json:"ids"`
+	IDs []int `json:"ids"`
 }
 
 type BookStatus struct {

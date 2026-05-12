@@ -13,6 +13,7 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 ## Development
 
 - Use `task test` to run tests
+- Use `task test-live-hardcover` to run live Hardcover API contract tests when `HARDCOVER_TOKEN` is set
 - Use `task lint` to run linters
 - Use `task build` to build the binary
 - Use `task coverage` to check test coverage

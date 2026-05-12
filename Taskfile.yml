@@ -14,6 +14,11 @@ tasks:
     cmds:
       - go test ./...
 
+  test-live-hardcover:
+    desc: Run live Hardcover API contract tests when HARDCOVER_TOKEN is set
+    cmds:
+      - go test ./internal/hardcover -run LiveContract -count=1 -v
+
   coverage:
     desc: Run tests with coverage
     cmds:
