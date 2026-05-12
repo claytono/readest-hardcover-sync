@@ -45,10 +45,11 @@ func (d *dryRunUpdater) InsertUserBook(_ context.Context, bookID, statusID, _ in
 }
 
 // UpdateUserBook returns a fake UserBook without calling the real implementation.
-func (d *dryRunUpdater) UpdateUserBook(_ context.Context, id int, statusID int) (*hardcover.UserBook, error) {
+func (d *dryRunUpdater) UpdateUserBook(_ context.Context, id int, statusID int, editionID *int) (*hardcover.UserBook, error) {
 	return &hardcover.UserBook{
-		ID:       id,
-		StatusID: statusID,
+		ID:        id,
+		StatusID:  statusID,
+		EditionID: editionID,
 	}, nil
 }
 

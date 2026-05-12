@@ -108,8 +108,8 @@ func (d *demoUpdater) InsertUserBook(_ context.Context, bookID, statusID, _ int,
 	return &hardcover.UserBook{ID: 9999, BookID: bookID, StatusID: statusID, EditionID: editionID}, nil
 }
 
-func (d *demoUpdater) UpdateUserBook(_ context.Context, id int, statusID int) (*hardcover.UserBook, error) {
-	return &hardcover.UserBook{ID: id, StatusID: statusID}, nil
+func (d *demoUpdater) UpdateUserBook(_ context.Context, id int, statusID int, editionID *int) (*hardcover.UserBook, error) {
+	return &hardcover.UserBook{ID: id, StatusID: statusID, EditionID: editionID}, nil
 }
 
 func (d *demoUpdater) InsertUserBookRead(_ context.Context, _ int, progressPages int, editionID *int, _ string, _ *string) (*hardcover.UserBookRead, error) {

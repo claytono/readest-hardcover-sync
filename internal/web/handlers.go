@@ -440,6 +440,8 @@ func (h *handlers) handleLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.scheduleLinkSync(hash)
+
 	book, ok := h.state.GetBook(hash)
 	if !ok {
 		http.Error(w, "book not found", http.StatusNotFound)
@@ -470,6 +472,18 @@ func (h *handlers) handleLink(w http.ResponseWriter, r *http.Request) {
 	if err := h.tmpl.ExecuteTemplate(w, "book_card.html", card); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
+}
+
+func (h *handlers) scheduleLinkSync(hash string) {
+	if h.engine == nil {
+		return
+	}
+	h.logger.Info("sync scheduled after book link", "hash", hash)
+	go func() {
+		if err := h.engine.SyncNow(h.ctx); err != nil {
+			h.logger.Error("link-triggered sync failed", "hash", hash, "error", err)
+		}
+	}()
 }
 
 // handleUnlink clears a book's Hardcover mapping.

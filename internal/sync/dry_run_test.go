@@ -74,7 +74,7 @@ func TestDryRun_InsertUserBook_DoesNotCallReal(t *testing.T) {
 func TestDryRun_UpdateUserBook_DoesNotCallReal(t *testing.T) {
 	dru, mock := newDryRunWithMock()
 
-	_, err := dru.UpdateUserBook(context.Background(), 10, 3)
+	_, err := dru.UpdateUserBook(context.Background(), 10, 3, nil)
 	require.NoError(t, err)
 	assert.Empty(t, mock.updateUserBookCalls, "real UpdateUserBook must not be called")
 }
@@ -115,7 +115,7 @@ func TestDryRun_UpdateUserBook_FakeResponse(t *testing.T) {
 
 	id := 10
 	statusID := 3
-	got, err := dru.UpdateUserBook(context.Background(), id, statusID)
+	got, err := dru.UpdateUserBook(context.Background(), id, statusID, nil)
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, id, got.ID)

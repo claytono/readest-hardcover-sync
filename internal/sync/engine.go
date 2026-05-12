@@ -98,10 +98,7 @@ func (e *Engine) Run(ctx context.Context, interval time.Duration) {
 // SyncNow runs a tick with the real updater, pushing changes to Hardcover.
 // Use this for manual sync mode where polling uses the dry-run updater.
 func (e *Engine) SyncNow(ctx context.Context) error {
-	saved := e.updater
-	e.updater = e.realUpdater
-	defer func() { e.updater = saved }()
-	return e.Tick(ctx)
+	return e.tick(ctx, e.realUpdater)
 }
 
 // FullSync requests a full re-pull of all books and configs from Readest.
@@ -116,6 +113,10 @@ func (e *Engine) FullSync(ctx context.Context) error {
 
 // Tick performs a single sync cycle. Returns immediately if a sync is already in progress.
 func (e *Engine) Tick(ctx context.Context) error {
+	return e.tick(ctx, e.updater)
+}
+
+func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 	e.mu.Lock()
 	if e.syncing {
 		e.mu.Unlock()
@@ -137,7 +138,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 
 	// Step 1: Cache privacy_setting_id and status names from Hardcover on first call.
 	if e.privacySettingID == 0 {
-		me, err := e.updater.GetMe(ctx)
+		me, err := updater.GetMe(ctx)
 		if err != nil {
 			return err
 		}
@@ -145,7 +146,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 			e.privacySettingID = me.AccountPrivacySettingID
 		}
 
-		statuses, err := e.updater.GetStatuses(ctx)
+		statuses, err := updater.GetStatuses(ctx)
 		if err != nil {
 			return err
 		}
@@ -218,7 +219,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 		if ts > maxConfigUpdatedAt {
 			maxConfigUpdatedAt = ts
 		}
-		if err := e.processConfig(ctx, cfg); err != nil {
+		if err := e.processConfig(ctx, cfg, updater); err != nil {
 			e.logger.Error("failed to process config", "book_hash", cfg.BookHash, "error", err)
 			e.emit(SyncEvent{Type: "error", Detail: err.Error()})
 		}
@@ -241,7 +242,7 @@ func (e *Engine) Tick(ctx context.Context) error {
 			BookHash: bs.BookHash,
 			Progress: fmt.Sprintf("[%d, %d]", bs.ReadestProgress[0], bs.ReadestProgress[1]),
 		}
-		if err := e.processConfig(ctx, synthCfg); err != nil {
+		if err := e.processConfig(ctx, synthCfg, updater); err != nil {
 			e.logger.Error("failed to sync pending progress", "book_hash", bs.BookHash, "title", bs.Title, "error", err)
 		}
 	}
@@ -381,7 +382,7 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 }
 
 // processConfig handles a single DBBookConfig: updates progress/status on Hardcover.
-func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) error {
+func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, updater ProgressUpdater) error {
 	// Get book from state; skip if not in state at all.
 	bs, ok := e.state.GetBook(cfg.BookHash)
 	if !ok {
@@ -423,38 +424,30 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 		hardcoverPages = ConvertProgress(current, total, bs.EditionPages)
 	}
 
-	// Skip if nothing changed.
-	if statusID == bs.LastStatusSent && hardcoverPages == bs.LastProgressSent {
-		return nil
-	}
-
 	var pct int
 	if total > 0 {
 		pct = current * 100 / total
 	}
-	progressMsg := "syncing progress"
-	if e.manualSync && e.updater != e.realUpdater {
-		progressMsg = "would sync progress (manual mode)"
+
+	var editionIDPtr *int
+	if bs.EditionID != 0 {
+		edID := bs.EditionID
+		editionIDPtr = &edID
 	}
-	e.logger.Info(progressMsg,
-		"title", bs.Title,
-		"slug", bs.HardcoverSlug,
-		"edition_id", bs.EditionID,
-		"status", e.statusName(statusID),
-		"progress", fmt.Sprintf("%d%% (%d/%d pages)", pct, hardcoverPages, bs.EditionPages),
-	)
-
-	// Ensure UserBookID exists.
 	userBookID := bs.UserBookID
-	if userBookID == 0 {
-		// Try GetUserBook first.
-		var editionIDPtr *int
-		if bs.EditionID != 0 {
-			edID := bs.EditionID
-			editionIDPtr = &edID
-		}
 
-		existing, err := e.updater.GetUserBook(ctx, bs.HardcoverBookID)
+	if statusID == bs.LastStatusSent && hardcoverPages == bs.LastProgressSent && (userBookID == 0 || editionIDPtr == nil) {
+		bs.ReadestProgress = [2]int{current, total}
+		e.state.SetBook(cfg.BookHash, bs)
+		return nil
+	}
+
+	// Ensure UserBookID exists and adopt any existing read record for the linked
+	// edition. Hardcover can already have a Want to Read user_book with an
+	// edition-specific read; updating that row keeps progress visible in the UI.
+	userBookEditionMatches := editionIDPtr == nil || userBookID != 0
+	if userBookID == 0 || editionIDPtr != nil {
+		existing, err := updater.GetUserBook(ctx, bs.HardcoverBookID)
 		if err != nil {
 			return err
 		}
@@ -465,20 +458,49 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 			if existing.StatusID != 0 {
 				bs.LastStatusSent = existing.StatusID
 			}
-		} else {
-			inserted, err := e.updater.InsertUserBook(ctx, bs.HardcoverBookID, statusID, e.privacySettingID, editionIDPtr)
+			userBookEditionMatches = editionIDPtr == nil || (existing.EditionID != nil && *existing.EditionID == *editionIDPtr)
+			if read, ok := selectUserBookRead(existing.UserBookReads, bs.EditionID, bs.UserBookReadID); ok {
+				bs.UserBookReadID = read.ID
+				if read.ProgressPages != nil {
+					bs.LastProgressSent = *read.ProgressPages
+				} else {
+					bs.LastProgressSent = 0
+				}
+			}
+		} else if userBookID == 0 {
+			inserted, err := updater.InsertUserBook(ctx, bs.HardcoverBookID, statusID, e.privacySettingID, editionIDPtr)
 			if err != nil {
 				return err
 			}
 			if inserted.ID > 0 {
 				userBookID = inserted.ID
 				bs.LastStatusSent = statusID
+				userBookEditionMatches = true
 			}
 		}
 		if userBookID > 0 {
 			bs.UserBookID = userBookID
 		}
 	}
+
+	// Skip if nothing changed after reconciling the existing Hardcover rows.
+	if statusID == bs.LastStatusSent && hardcoverPages == bs.LastProgressSent && userBookEditionMatches {
+		bs.ReadestProgress = [2]int{current, total}
+		e.state.SetBook(cfg.BookHash, bs)
+		return nil
+	}
+
+	progressMsg := "syncing progress"
+	if e.manualSync && updater != e.realUpdater {
+		progressMsg = "would sync progress (manual mode)"
+	}
+	e.logger.Info(progressMsg,
+		"title", bs.Title,
+		"slug", bs.HardcoverSlug,
+		"edition_id", bs.EditionID,
+		"status", e.statusName(statusID),
+		"progress", fmt.Sprintf("%d%% (%d/%d pages)", pct, hardcoverPages, bs.EditionPages),
+	)
 
 	// If we don't have a valid UserBookID (dry-run), skip Hardcover writes.
 	if userBookID == 0 {
@@ -501,9 +523,9 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 		return nil
 	}
 
-	// Update status via UpdateUserBook if changed.
-	if statusID != bs.LastStatusSent {
-		if _, err := e.updater.UpdateUserBook(ctx, userBookID, statusID); err != nil {
+	// Update status and linked edition if changed.
+	if statusID != bs.LastStatusSent || !userBookEditionMatches {
+		if _, err := updater.UpdateUserBook(ctx, userBookID, statusID, editionIDPtr); err != nil {
 			return err
 		}
 		bs.LastStatusSent = statusID
@@ -517,16 +539,10 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 			finishedAt = &today
 		}
 
-		var editionIDPtr *int
-		if bs.EditionID != 0 {
-			edID := bs.EditionID
-			editionIDPtr = &edID
-		}
-
 		if bs.UserBookReadID == 0 {
 			// Insert new reading session.
 			startedAt := time.Now().Format("2006-01-02")
-			read, err := e.updater.InsertUserBookRead(ctx, userBookID, hardcoverPages, editionIDPtr, startedAt, finishedAt)
+			read, err := updater.InsertUserBookRead(ctx, userBookID, hardcoverPages, editionIDPtr, startedAt, finishedAt)
 			if err != nil {
 				return err
 			}
@@ -535,7 +551,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 			}
 		} else {
 			// Update existing reading session.
-			if _, err := e.updater.UpdateUserBookRead(ctx, bs.UserBookReadID, hardcoverPages, finishedAt); err != nil {
+			if _, err := updater.UpdateUserBookRead(ctx, bs.UserBookReadID, hardcoverPages, finishedAt); err != nil {
 				return err
 			}
 		}
@@ -550,6 +566,34 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig) er
 	bs.ReadestProgress = [2]int{current, total}
 	e.state.SetBook(cfg.BookHash, bs)
 	return nil
+}
+
+func selectUserBookRead(reads []hardcover.UserBookRead, editionID, currentReadID int) (hardcover.UserBookRead, bool) {
+	if editionID != 0 {
+		for _, read := range reads {
+			if read.ID != 0 && read.EditionID != nil && *read.EditionID == editionID {
+				return read, true
+			}
+		}
+	}
+	if currentReadID != 0 {
+		for _, read := range reads {
+			if read.ID == currentReadID {
+				return read, true
+			}
+		}
+	}
+	for _, read := range reads {
+		if read.ID != 0 && read.EditionID == nil {
+			return read, true
+		}
+	}
+	for _, read := range reads {
+		if read.ID != 0 {
+			return read, true
+		}
+	}
+	return hardcover.UserBookRead{}, false
 }
 
 // parseTimestamp parses an RFC3339 timestamp string and returns Unix milliseconds.

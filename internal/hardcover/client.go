@@ -244,10 +244,13 @@ func (c *Client) InsertUserBook(ctx context.Context, bookID, statusID, privacySe
 	return &data.InsertUserBook.UserBook, nil
 }
 
-// UpdateUserBook updates the status of an existing user_book record.
-func (c *Client) UpdateUserBook(ctx context.Context, id, statusID int) (*UserBook, error) {
+// UpdateUserBook updates the status and optionally the edition of an existing user_book record.
+func (c *Client) UpdateUserBook(ctx context.Context, id, statusID int, editionID *int) (*UserBook, error) {
 	object := map[string]any{
 		"status_id": statusID,
+	}
+	if editionID != nil {
+		object["edition_id"] = *editionID
 	}
 
 	var data struct {

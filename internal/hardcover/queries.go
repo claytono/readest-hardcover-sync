@@ -60,7 +60,7 @@ const mutationInsertUserBook = `mutation InsertUserBook($object: UserBookCreateI
 const mutationUpdateUserBook = `mutation UpdateUserBook($id: Int!, $object: UserBookUpdateInput!) {
   update_user_book(id: $id, object: $object) {
     error
-    user_book { id status_id }
+    user_book { id status_id edition_id }
   }
 }`
 

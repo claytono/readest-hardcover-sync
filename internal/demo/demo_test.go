@@ -172,7 +172,7 @@ func TestDemoUpdater(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 9999, inserted.ID)
 
-	updated, err := u.UpdateUserBook(ctx, 1, 3)
+	updated, err := u.UpdateUserBook(ctx, 1, 3, nil)
 	require.NoError(t, err)
 	assert.Equal(t, 3, updated.StatusID)
 
