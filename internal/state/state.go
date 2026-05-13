@@ -37,8 +37,9 @@ type BookState struct {
 	MatchMethod     string `json:"match_method,omitempty"`
 
 	// Hardcover IDs for updates
-	UserBookID     int `json:"user_book_id,omitempty"`
-	UserBookReadID int `json:"user_book_read_id,omitempty"`
+	UserBookID        int `json:"user_book_id,omitempty"`
+	UserBookEditionID int `json:"user_book_edition_id,omitempty"`
+	UserBookReadID    int `json:"user_book_read_id,omitempty"`
 
 	// Last values sent (skip redundant updates)
 	LastStatusSent   int `json:"last_status_sent,omitempty"`
@@ -50,6 +51,7 @@ type BookState struct {
 
 	// Display metadata
 	Series    string `json:"series,omitempty"`     // e.g., "Dungeon Crawler Carl #7"
+	CoverURL  string `json:"cover_url,omitempty"`  // source cover image URL from Hardcover
 	CoverPath string `json:"cover_path,omitempty"` // local path to cached cover image
 
 	// Activity tracking for sort order
@@ -199,6 +201,9 @@ func (s *State) SetManualLink(hash string, bookID int, slug string, editionID, e
 	b.EditionPages = editionPages
 	b.MatchMethod = "manual"
 	b.Unmatched = false
+	b.Series = ""
+	b.CoverURL = ""
+	b.CoverPath = ""
 	s.Books[hash] = b
 }
 

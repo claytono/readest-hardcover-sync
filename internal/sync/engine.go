@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -23,11 +24,16 @@ type Engine struct {
 	matcher     *Matcher
 	logger      *slog.Logger
 	events      *EventBus // optional; nil disables event emission
+	notifier    Notifier  // optional; nil disables external notifications
 	coversDir   string    // directory for cached cover images; empty disables
 
 	mu              sync.Mutex // prevents concurrent Tick() calls
 	syncing         bool
 	pendingFullSync bool // reset timestamps at start of next Tick
+
+	notifyMu                 sync.Mutex
+	criticalNotificationDays map[string]string
+	now                      func() time.Time
 
 	manualSync bool // true = dry-run updater for polling, real updater for SyncNow
 
@@ -41,9 +47,19 @@ type Engine struct {
 // EngineOptions holds optional dependencies for NewEngine.
 type EngineOptions struct {
 	Events         *EventBus
+	Notifier       Notifier
 	CoversDir      string
 	MinSyncPercent float64 // minimum progress % before syncing (0 = no threshold)
 	MinSyncPages   int     // minimum Readest pages before syncing (0 = no threshold)
+}
+
+type bookAddedNotification struct {
+	bookHash   string
+	autoLinked bool
+}
+
+type bookCompletedNotification struct {
+	book state.BookState
 }
 
 // NewEngine constructs an Engine with the given dependencies.
@@ -59,9 +75,11 @@ func NewEngine(readest ReadestPuller, finder BookFinder, updater ProgressUpdater
 		state:       st,
 		matcher:     matcher,
 		logger:      logger,
+		now:         time.Now,
 	}
 	if opts != nil {
 		e.events = opts.Events
+		e.notifier = opts.Notifier
 		e.coversDir = opts.CoversDir
 		e.minSyncPercent = opts.MinSyncPercent
 		e.minSyncPages = opts.MinSyncPages
@@ -98,7 +116,9 @@ func (e *Engine) Run(ctx context.Context, interval time.Duration) {
 // SyncNow runs a tick with the real updater, pushing changes to Hardcover.
 // Use this for manual sync mode where polling uses the dry-run updater.
 func (e *Engine) SyncNow(ctx context.Context) error {
-	return e.tick(ctx, e.realUpdater)
+	err := e.tick(ctx, e.realUpdater)
+	e.notifyCriticalSyncError(ctx, err)
+	return err
 }
 
 // FullSync requests a full re-pull of all books and configs from Readest.
@@ -113,7 +133,9 @@ func (e *Engine) FullSync(ctx context.Context) error {
 
 // Tick performs a single sync cycle. Returns immediately if a sync is already in progress.
 func (e *Engine) Tick(ctx context.Context) error {
-	return e.tick(ctx, e.updater)
+	err := e.tick(ctx, e.updater)
+	e.notifyCriticalSyncError(ctx, err)
+	return err
 }
 
 func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
@@ -130,10 +152,17 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 	}
 	e.mu.Unlock()
 
-	defer func() {
+	released := false
+	releaseSync := func() {
 		e.mu.Lock()
 		e.syncing = false
 		e.mu.Unlock()
+		released = true
+	}
+	defer func() {
+		if !released {
+			releaseSync()
+		}
 	}()
 
 	// Step 1: Cache privacy_setting_id and status names from Hardcover on first call.
@@ -184,6 +213,8 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 
 	var maxBookUpdatedAt int64
 	var newBooks, updatedBooks int
+	var pendingBookNotifications []bookAddedNotification
+	var pendingCompletionNotifications []bookCompletedNotification
 	for _, book := range books {
 		if book.DeletedAt != nil {
 			continue
@@ -193,9 +224,12 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 			maxBookUpdatedAt = ts
 		}
 		_, exists := e.state.GetBook(book.BookHash)
-		if err := e.processBook(ctx, book); err != nil {
+		notification, err := e.processBook(ctx, book)
+		if err != nil {
 			e.logger.Error("failed to process book", "book_hash", book.BookHash, "title", book.Title, "error", err)
 			e.emit(SyncEvent{Type: "error", Title: book.Title, Detail: err.Error()})
+		} else if notification != nil {
+			pendingBookNotifications = append(pendingBookNotifications, *notification)
 		}
 		if exists {
 			updatedBooks++
@@ -219,9 +253,12 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		if ts > maxConfigUpdatedAt {
 			maxConfigUpdatedAt = ts
 		}
-		if err := e.processConfig(ctx, cfg, updater); err != nil {
+		notification, err := e.processConfig(ctx, cfg, updater)
+		if err != nil {
 			e.logger.Error("failed to process config", "book_hash", cfg.BookHash, "error", err)
 			e.emit(SyncEvent{Type: "error", Detail: err.Error()})
+		} else if notification != nil {
+			pendingCompletionNotifications = append(pendingCompletionNotifications, *notification)
 		}
 	}
 
@@ -242,8 +279,11 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 			BookHash: bs.BookHash,
 			Progress: fmt.Sprintf("[%d, %d]", bs.ReadestProgress[0], bs.ReadestProgress[1]),
 		}
-		if err := e.processConfig(ctx, synthCfg, updater); err != nil {
+		notification, err := e.processConfig(ctx, synthCfg, updater)
+		if err != nil {
 			e.logger.Error("failed to sync pending progress", "book_hash", bs.BookHash, "title", bs.Title, "error", err)
+		} else if notification != nil {
+			pendingCompletionNotifications = append(pendingCompletionNotifications, *notification)
 		}
 	}
 
@@ -253,7 +293,7 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 			if bs.HardcoverBookID == 0 || bs.HardcoverSlug == "" {
 				continue
 			}
-			if bs.CoverPath != "" && bs.Series != "" {
+			if bs.CoverPath != "" && bs.CoverURL != "" {
 				continue
 			}
 			// Look up the book to get the cover URL.
@@ -269,6 +309,10 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 			if bs.Series == "" && book.SeriesName() != "" {
 				newSeries = book.SeriesName()
 			}
+			newCoverURL := ""
+			if bs.CoverURL == "" && book.CoverURL() != "" {
+				newCoverURL = book.CoverURL()
+			}
 			newCoverPath := ""
 			if bs.CoverPath == "" && book.CoverURL() != "" {
 				coverPath, err := DownloadCover(e.coversDir, bs.BookHash, book.CoverURL())
@@ -278,10 +322,13 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 					newCoverPath = coverPath
 				}
 			}
-			if newSeries != "" || newCoverPath != "" {
+			if newSeries != "" || newCoverURL != "" || newCoverPath != "" {
 				e.state.UpdateBook(bs.BookHash, func(b *state.BookState) {
 					if newSeries != "" {
 						b.Series = newSeries
+					}
+					if newCoverURL != "" {
+						b.CoverURL = newCoverURL
 					}
 					if newCoverPath != "" {
 						b.CoverPath = newCoverPath
@@ -318,11 +365,25 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 	)
 	e.state.SetLastSyncRanAt(time.Now())
 	e.emit(SyncEvent{Type: "sync_complete", Detail: fmt.Sprintf("%d matched, %d unmatched", matchedCount, unmatchedCount)})
-	return e.state.Save()
+	if err := e.state.Save(); err != nil {
+		return fmt.Errorf("save sync state: %w", err)
+	}
+	releaseSync()
+	for _, notification := range pendingBookNotifications {
+		book, ok := e.state.GetBook(notification.bookHash)
+		if !ok {
+			continue
+		}
+		e.notifyBookAdded(ctx, book, notification.autoLinked)
+	}
+	for _, notification := range pendingCompletionNotifications {
+		e.notifyBookCompleted(ctx, notification.book)
+	}
+	return nil
 }
 
 // processBook handles a single DBBook: updates existing state or matches and creates new entry.
-func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
+func (e *Engine) processBook(ctx context.Context, book readest.DBBook) (*bookAddedNotification, error) {
 	// If already in state, just update ReadestStatus if changed.
 	if _, ok := e.state.GetBook(book.BookHash); ok {
 		if book.ReadingStatus != "" {
@@ -332,7 +393,7 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 				}
 			})
 		}
-		return nil
+		return nil, nil
 	}
 
 	// Parse identifiers from metadata, title, author.
@@ -341,7 +402,7 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 	// Match via matcher.
 	result, err := e.matcher.Match(ctx, ids)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("match book %q: %w", book.BookHash, err)
 	}
 
 	bs := state.BookState{
@@ -363,6 +424,7 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 		bs.EditionPages = result.EditionPages
 		bs.ReadingFormatID = result.ReadingFormatID
 		bs.MatchMethod = result.MatchMethod
+		bs.CoverURL = result.CoverURL
 		bs.Series = result.Series
 		e.logger.Info("matched book", "title", book.Title, "slug", result.Slug, "method", result.MatchMethod)
 		e.emit(SyncEvent{Type: "book_matched", Title: book.Title, Detail: "via " + result.MatchMethod})
@@ -378,21 +440,21 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) error {
 	}
 
 	e.state.SetBook(book.BookHash, bs)
-	return nil
+	return &bookAddedNotification{bookHash: book.BookHash, autoLinked: result != nil}, nil
 }
 
 // processConfig handles a single DBBookConfig: updates progress/status on Hardcover.
-func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, updater ProgressUpdater) error {
+func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, updater ProgressUpdater) (*bookCompletedNotification, error) {
 	// Get book from state; skip if not in state at all.
 	bs, ok := e.state.GetBook(cfg.BookHash)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 
 	// Parse progress.
 	progress, err := readest.ParseConfigProgress(cfg.Progress)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("parse progress for book %q: %w", cfg.BookHash, err)
 	}
 
 	current, total := progress[0], progress[1]
@@ -408,14 +470,14 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 	// If not matched yet, save progress and stop — can't push to Hardcover.
 	if bs.HardcoverBookID == 0 {
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil
+		return nil, nil
 	}
 
 	// DeriveStatus; skip if no status update needed.
 	statusID := DeriveStatus(current, total, bs.ReadestStatus, e.minSyncPercent, e.minSyncPages)
 	if statusID == hardcover.StatusNone {
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil
+		return nil, nil
 	}
 
 	// ConvertProgress (skip progress update if EditionPages == 0).
@@ -435,21 +497,31 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		editionIDPtr = &edID
 	}
 	userBookID := bs.UserBookID
+	lastStatusBeforeWrite := bs.LastStatusSent
+	writesToHardcover := !e.manualSync || updater == e.realUpdater
+	statusUpdated := false
+	needsManualCompletionReconcile := writesToHardcover && e.manualSync && statusID == hardcover.StatusRead
+	cachedLinkageMatchesEdition := localLinkageMatchesEdition(bs, editionIDPtr)
+	needsUserBookLookup := userBookID == 0 || !cachedLinkageMatchesEdition || needsManualCompletionReconcile
+	canSkipBeforeReconcile := userBookID == 0 || !needsUserBookLookup
+	shouldNotifyComplete := func() bool {
+		return writesToHardcover && statusUpdated && statusID == hardcover.StatusRead && lastStatusBeforeWrite != hardcover.StatusRead
+	}
 
-	if statusID == bs.LastStatusSent && hardcoverPages == bs.LastProgressSent && (userBookID == 0 || editionIDPtr == nil) {
+	if statusID == bs.LastStatusSent && hardcoverPages == bs.LastProgressSent && canSkipBeforeReconcile {
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil
+		return nil, nil
 	}
 
 	// Ensure UserBookID exists and adopt any existing read record for the linked
 	// edition. Hardcover can already have a Want to Read user_book with an
 	// edition-specific read; updating that row keeps progress visible in the UI.
 	userBookEditionMatches := editionIDPtr == nil || userBookID != 0
-	if userBookID == 0 || editionIDPtr != nil {
+	if needsUserBookLookup {
 		existing, err := updater.GetUserBook(ctx, bs.HardcoverBookID)
 		if err != nil {
-			return err
+			return nil, fmt.Errorf("get Hardcover user book for book %q: %w", cfg.BookHash, err)
 		}
 
 		if existing != nil {
@@ -458,6 +530,12 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 			if existing.StatusID != 0 {
 				bs.LastStatusSent = existing.StatusID
 			}
+			if existing.EditionID != nil {
+				bs.UserBookEditionID = *existing.EditionID
+			} else {
+				bs.UserBookEditionID = hardcover.StatusNone
+			}
+			lastStatusBeforeWrite = bs.LastStatusSent
 			userBookEditionMatches = editionIDPtr == nil || (existing.EditionID != nil && *existing.EditionID == *editionIDPtr)
 			if read, ok := selectUserBookRead(existing.UserBookReads, bs.EditionID, bs.UserBookReadID); ok {
 				bs.UserBookReadID = read.ID
@@ -467,14 +545,21 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 					bs.LastProgressSent = 0
 				}
 			}
-		} else if userBookID == 0 {
+		} else {
+			lastStatusBeforeWrite = hardcover.StatusNone
+		}
+		if existing == nil && userBookID == 0 {
 			inserted, err := updater.InsertUserBook(ctx, bs.HardcoverBookID, statusID, e.privacySettingID, editionIDPtr)
 			if err != nil {
-				return err
+				return nil, fmt.Errorf("insert Hardcover user book for book %q: %w", cfg.BookHash, err)
 			}
 			if inserted.ID > 0 {
 				userBookID = inserted.ID
 				bs.LastStatusSent = statusID
+				if editionIDPtr != nil {
+					bs.UserBookEditionID = *editionIDPtr
+				}
+				statusUpdated = true
 				userBookEditionMatches = true
 			}
 		}
@@ -487,7 +572,10 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 	if statusID == bs.LastStatusSent && hardcoverPages == bs.LastProgressSent && userBookEditionMatches {
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil
+		if shouldNotifyComplete() {
+			return &bookCompletedNotification{book: bs}, nil
+		}
+		return nil, nil
 	}
 
 	progressMsg := "syncing progress"
@@ -507,7 +595,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		e.emit(SyncEvent{Type: "progress_pending", Title: bs.Title, Detail: fmt.Sprintf("would sync %d%%", pct)})
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil
+		return nil, nil
 	}
 
 	// Only allow forward status transitions (want-to-read → reading → read).
@@ -520,15 +608,22 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		)
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil
+		return nil, nil
 	}
 
 	// Update status and linked edition if changed.
 	if statusID != bs.LastStatusSent || !userBookEditionMatches {
+		statusChanged := statusID != bs.LastStatusSent
 		if _, err := updater.UpdateUserBook(ctx, userBookID, statusID, editionIDPtr); err != nil {
-			return err
+			return nil, fmt.Errorf("update Hardcover user book for book %q: %w", cfg.BookHash, err)
 		}
 		bs.LastStatusSent = statusID
+		if editionIDPtr != nil {
+			bs.UserBookEditionID = *editionIDPtr
+		}
+		if statusChanged {
+			statusUpdated = true
+		}
 	}
 
 	// Update progress.
@@ -544,7 +639,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 			startedAt := time.Now().Format("2006-01-02")
 			read, err := updater.InsertUserBookRead(ctx, userBookID, hardcoverPages, editionIDPtr, startedAt, finishedAt)
 			if err != nil {
-				return err
+				return nil, fmt.Errorf("insert Hardcover user book read for book %q: %w", cfg.BookHash, err)
 			}
 			if read.ID > 0 {
 				bs.UserBookReadID = read.ID
@@ -552,7 +647,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		} else {
 			// Update existing reading session.
 			if _, err := updater.UpdateUserBookRead(ctx, bs.UserBookReadID, hardcoverPages, finishedAt); err != nil {
-				return err
+				return nil, fmt.Errorf("update Hardcover user book read for book %q: %w", cfg.BookHash, err)
 			}
 		}
 
@@ -561,11 +656,25 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		}
 	}
 
+	markedComplete := shouldNotifyComplete()
+
 	e.emit(SyncEvent{Type: "progress_synced", Title: bs.Title, Detail: fmt.Sprintf("%d%% → Hardcover", pct)})
 
 	bs.ReadestProgress = [2]int{current, total}
 	e.state.SetBook(cfg.BookHash, bs)
-	return nil
+	if markedComplete {
+		return &bookCompletedNotification{book: bs}, nil
+	}
+	return nil, nil
+}
+
+func localLinkageMatchesEdition(bs state.BookState, editionIDPtr *int) bool {
+	if editionIDPtr == nil {
+		return true
+	}
+	return bs.UserBookID != 0 &&
+		bs.UserBookEditionID == *editionIDPtr &&
+		bs.UserBookReadID != 0
 }
 
 func selectUserBookRead(reads []hardcover.UserBookRead, editionID, currentReadID int) (hardcover.UserBookRead, bool) {
@@ -617,6 +726,65 @@ func (e *Engine) emit(evt SyncEvent) {
 	if e.events != nil {
 		e.events.Publish(evt)
 	}
+}
+
+func (e *Engine) notifyBookAdded(ctx context.Context, book state.BookState, autoLinked bool) {
+	if e.notifier == nil {
+		return
+	}
+	if err := e.notifier.NotifyBookAdded(ctx, book, autoLinked); err != nil {
+		e.logger.Error("notification failed", "event", "book_added", "title", book.Title, "error", err)
+	}
+}
+
+func (e *Engine) notifyBookCompleted(ctx context.Context, book state.BookState) {
+	if e.notifier == nil {
+		return
+	}
+	if err := e.notifier.NotifyBookCompleted(ctx, book); err != nil {
+		e.logger.Error("notification failed", "event", "book_completed", "title", book.Title, "error", err)
+	}
+}
+
+func (e *Engine) notifyCriticalSyncError(ctx context.Context, err error) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return
+	}
+	e.notifyCriticalError(ctx, err)
+}
+
+func (e *Engine) notifyCriticalError(ctx context.Context, err error) {
+	if e.notifier == nil || err == nil {
+		return
+	}
+
+	now := time.Now
+	if e.now != nil {
+		now = e.now
+	}
+	today := now().Format("2006-01-02")
+	key := criticalNotificationKey(err)
+
+	e.notifyMu.Lock()
+	if e.criticalNotificationDays == nil {
+		e.criticalNotificationDays = make(map[string]string)
+	}
+	if e.criticalNotificationDays[key] == today {
+		e.notifyMu.Unlock()
+		return
+	}
+
+	if notifyErr := e.notifier.NotifyCriticalError(ctx, err); notifyErr != nil {
+		e.notifyMu.Unlock()
+		e.logger.Error("notification failed", "event", "critical_error", "error", notifyErr)
+		return
+	}
+	e.criticalNotificationDays[key] = today
+	e.notifyMu.Unlock()
+}
+
+func criticalNotificationKey(err error) string {
+	return fmt.Sprintf("%T:%s", err, err.Error())
 }
 
 func (e *Engine) statusName(id int) string {

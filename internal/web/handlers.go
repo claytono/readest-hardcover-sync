@@ -418,19 +418,32 @@ func (h *handlers) handleLink(w http.ResponseWriter, r *http.Request) {
 	}
 	h.state.SetManualLink(hash, bookID, slug, editionID, editionPages)
 
-	// Download cover image by looking up the book server-side.
-	if h.coversDir != "" && slug != "" {
+	// Look up the linked book server-side so state keeps Hardcover metadata that
+	// was not submitted through the link form.
+	if slug != "" {
 		if book, err := h.finder.FindBookBySlug(r.Context(), slug); err != nil {
 			h.logger.Error("failed to look up book for cover", "slug", slug, "error", err)
-		} else if book != nil && book.CoverURL() != "" {
-			if coverPath, err := syncsvc.DownloadCover(h.coversDir, hash, book.CoverURL()); err != nil {
-				h.logger.Error("failed to download cover", "hash", hash, "error", err)
-			} else if coverPath != "" {
-				seriesName := book.SeriesName()
+		} else if book != nil {
+			seriesName := book.SeriesName()
+			coverURL := book.CoverURL()
+			if seriesName != "" || coverURL != "" {
 				h.state.UpdateBook(hash, func(b *state.BookState) {
-					b.CoverPath = coverPath
-					b.Series = seriesName
+					if seriesName != "" {
+						b.Series = seriesName
+					}
+					if coverURL != "" {
+						b.CoverURL = coverURL
+					}
 				})
+			}
+			if h.coversDir != "" && coverURL != "" {
+				if coverPath, err := syncsvc.DownloadCover(h.coversDir, hash, coverURL); err != nil {
+					h.logger.Error("failed to download cover", "hash", hash, "error", err)
+				} else if coverPath != "" {
+					h.state.UpdateBook(hash, func(b *state.BookState) {
+						b.CoverPath = coverPath
+					})
+				}
 			}
 		}
 	}
@@ -509,6 +522,9 @@ func (h *handlers) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		b.LastProgressSent = 0
 		b.ReadingFormatID = 0
 		b.Unmatched = true
+		b.Series = ""
+		b.CoverURL = ""
+		b.CoverPath = ""
 	})
 	if err := h.state.Save(); err != nil {
 		http.Error(w, fmt.Sprintf("failed to save state: %v", err), http.StatusInternalServerError)

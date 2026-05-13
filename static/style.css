@@ -264,9 +264,13 @@ a.btn { display: inline-block; width: auto; }
   border-radius: 8px;
   overflow: hidden;
   cursor: pointer;
-  transition: border-color 0.15s, transform 0.1s;
+  transition: border-color 0.15s, box-shadow 0.2s, transform 0.1s;
 }
 .book-card:hover { border-color: #3a3b5d; transform: translateY(-2px); }
+.book-card.linked-highlight {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.35);
+}
 .book-card.unmatched { border-color: #3a2a1a; }
 .book-card.unmatched:hover { border-color: #5a3a1a; }
 

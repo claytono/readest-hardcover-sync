@@ -17,6 +17,7 @@ import (
 	"github.com/claytono/readest-hardcover-sync/internal/demo"
 	"github.com/claytono/readest-hardcover-sync/internal/hardcover"
 	"github.com/claytono/readest-hardcover-sync/internal/identifier"
+	"github.com/claytono/readest-hardcover-sync/internal/notifications"
 	"github.com/claytono/readest-hardcover-sync/internal/readest"
 	"github.com/claytono/readest-hardcover-sync/internal/state"
 	syncsvc "github.com/claytono/readest-hardcover-sync/internal/sync"
@@ -89,6 +90,21 @@ func newHardcoverClient(cfg *config.Config) *hardcover.Client {
 	return hardcover.NewClient(cfg.HardcoverToken)
 }
 
+func newNotifier(cfg *config.Config, logger *slog.Logger) syncsvc.Notifier {
+	if cfg.SlackWebhookURL == "" {
+		return nil
+	}
+	notifier, err := notifications.NewSlack(notifications.SlackOptions{
+		WebhookURL: cfg.SlackWebhookURL,
+		BaseURL:    cfg.PublicBaseURL,
+	})
+	if err != nil {
+		logger.Error("notification config error", "error", err)
+		os.Exit(1)
+	}
+	return notifier
+}
+
 // runServer starts the HTTP server and sync engine.
 func runServer(logger *slog.Logger) {
 	cfg := loadConfig(logger)
@@ -116,8 +132,10 @@ func runServer(logger *slog.Logger) {
 
 	matcher := syncsvc.NewMatcher(hardcoverClient, cfg.EnableTitleMatch)
 	events := syncsvc.NewEventBus(200)
+	notifier := newNotifier(cfg, logger)
 	engine := syncsvc.NewEngine(readestClient, hardcoverClient, hardcoverClient, st, matcher, logger, cfg.ManualSync, &syncsvc.EngineOptions{
 		Events:         events,
+		Notifier:       notifier,
 		CoversDir:      cfg.CoversDir,
 		MinSyncPercent: cfg.MinSyncPercent,
 		MinSyncPages:   cfg.MinSyncPages,

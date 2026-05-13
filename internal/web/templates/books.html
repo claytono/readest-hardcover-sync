@@ -90,15 +90,17 @@
   });
 
   // Client-side filtering with URL hash persistence
-  var params = new URLSearchParams(location.hash.slice(1));
-  var currentFilter = params.get('filter') || 'all';
-  var currentSearch = params.get('q') || '';
+  var hashParams = new URLSearchParams(location.hash.slice(1));
+  var queryParams = new URLSearchParams(location.search);
+  var currentFilter = hashParams.get('filter') || 'all';
+  var currentSearch = hashParams.get('q') || '';
+  var focusedBook = queryParams.get('book') || hashParams.get('book') || '';
 
   function saveFilterState() {
     var p = new URLSearchParams();
     if (currentFilter !== 'all') p.set('filter', currentFilter);
     if (currentSearch) p.set('q', currentSearch);
-    history.replaceState(null, '', p.toString() ? '#' + p.toString() : location.pathname);
+    history.replaceState(null, '', location.pathname + (p.toString() ? '#' + p.toString() : ''));
   }
 
   function filterBooks(filter, btn) {
@@ -127,6 +129,26 @@
     }
     applyFilters();
   })();
+
+  window.addEventListener('DOMContentLoaded', function() {
+    if (!focusedBook) return;
+    var card = document.getElementById('book-' + focusedBook);
+    if (!card) return;
+    card.style.display = '';
+    card.scrollIntoView({ block: 'center' });
+    card.classList.add('linked-highlight');
+    setTimeout(function() { card.classList.remove('linked-highlight'); }, 4000);
+    fetch('/books/' + encodeURIComponent(focusedBook) + '/detail')
+      .then(function(response) {
+        if (!response.ok) throw new Error('failed to load book detail');
+        return response.text();
+      })
+      .then(function(html) {
+        detailModal.innerHTML = html;
+        detailModal.showModal();
+      })
+      .catch(function() {});
+  });
 
   function applyFilters() {
     document.querySelectorAll('.book-card').forEach(function(card) {

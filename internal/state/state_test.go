@@ -31,23 +31,24 @@ func TestState_SaveAndReload(t *testing.T) {
 	s.SetLastBookSync(1234567890)
 	s.SetLastConfigSync(9876543210)
 	s.SetBook("hash1", BookState{
-		BookHash:         "hash1",
-		Title:            "Test Book",
-		Author:           "Test Author",
-		HardcoverBookID:  42,
-		HardcoverSlug:    "test-book",
-		EditionID:        99,
-		EditionPages:     300,
-		ReadingFormatID:  1,
-		MatchMethod:      "isbn",
-		UserBookID:       10,
-		UserBookReadID:   20,
-		LastStatusSent:   2,
-		LastProgressSent: 150,
-		ReadestProgress:  [2]int{150, 300},
-		ReadestStatus:    "reading",
-		Unmatched:        false,
-		LastError:        "",
+		BookHash:          "hash1",
+		Title:             "Test Book",
+		Author:            "Test Author",
+		HardcoverBookID:   42,
+		HardcoverSlug:     "test-book",
+		EditionID:         99,
+		EditionPages:      300,
+		ReadingFormatID:   1,
+		MatchMethod:       "isbn",
+		UserBookID:        10,
+		UserBookEditionID: 99,
+		UserBookReadID:    20,
+		LastStatusSent:    2,
+		LastProgressSent:  150,
+		ReadestProgress:   [2]int{150, 300},
+		ReadestStatus:     "reading",
+		Unmatched:         false,
+		LastError:         "",
 	})
 	s.SetBook("hash2", BookState{
 		BookHash:  "hash2",
@@ -79,6 +80,7 @@ func TestState_SaveAndReload(t *testing.T) {
 	assert.Equal(t, 1, b1.ReadingFormatID)
 	assert.Equal(t, "isbn", b1.MatchMethod)
 	assert.Equal(t, 10, b1.UserBookID)
+	assert.Equal(t, 99, b1.UserBookEditionID)
 	assert.Equal(t, 20, b1.UserBookReadID)
 	assert.Equal(t, 2, b1.LastStatusSent)
 	assert.Equal(t, 150, b1.LastProgressSent)
@@ -151,6 +153,9 @@ func TestState_SetManualLink(t *testing.T) {
 		BookHash:  "hash1",
 		Title:     "Some Book",
 		Unmatched: true,
+		Series:    "Old Series #1",
+		CoverURL:  "https://assets.example.com/old-cover.jpg",
+		CoverPath: "old-cover.jpg",
 	})
 
 	s.SetManualLink("hash1", 55, "some-book", 200, 400)
@@ -163,6 +168,9 @@ func TestState_SetManualLink(t *testing.T) {
 	assert.Equal(t, 400, b.EditionPages)
 	assert.Equal(t, "manual", b.MatchMethod)
 	assert.False(t, b.Unmatched)
+	assert.Empty(t, b.Series)
+	assert.Empty(t, b.CoverURL)
+	assert.Empty(t, b.CoverPath)
 	// Title should be preserved
 	assert.Equal(t, "Some Book", b.Title)
 }

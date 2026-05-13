@@ -25,6 +25,8 @@ The service polls Readest's cloud for book and progress changes, matches them to
 | `READEST_EMAIL`      | yes      |              | Your Readest account email                                                                      |
 | `READEST_PASSWORD`   | yes      |              | Your Readest account password                                                                   |
 | `HARDCOVER_TOKEN`    | yes      |              | Hardcover API token (may include "Bearer " prefix)                                              |
+| `PUBLIC_BASE_URL`    | no       |              | Public web UI URL used for notification links                                                   |
+| `SLACK_WEBHOOK_URL`  | no       |              | Slack incoming webhook URL. Requires `PUBLIC_BASE_URL` when set                                 |
 | `SYNC_INTERVAL`      | no       | `10m`        | How often to poll Readest                                                                       |
 | `LISTEN_ADDR`        | no       | `:8080`      | Web UI listen address                                                                           |
 | `STATE_FILE`         | no       | `state.json` | Path to the state file                                                                          |
@@ -87,6 +89,16 @@ Set `MANUAL_SYNC=true` for first-time use. In this mode:
 - Click "Sync" in the sidebar when ready to push to Hardcover
 
 Once you're confident the matching is correct, you can switch to automatic mode by removing `MANUAL_SYNC` or setting it to `false`.
+
+## Notifications
+
+Set `SLACK_WEBHOOK_URL` and `PUBLIC_BASE_URL` to enable Slack notifications. Slack messages link directly back to the book in the web UI and include Hardcover's cover image when one is available. If no cover is available, the message uses the Slack `:question:` emoji.
+
+Slack sends notifications when:
+
+- A new Readest book is discovered, including whether it linked automatically
+- A book is marked complete in Hardcover
+- A critical sync error occurs, at most once per day per distinct error per service startup
 
 ## Web UI
 
