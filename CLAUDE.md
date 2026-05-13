@@ -60,6 +60,7 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 - Credentials go in `.envrc.local` (gitignored)
 - State persisted in `state.json` (configurable via `STATE_FILE`)
 - Cover images cached in `covers/` directory (configurable via `COVERS_DIR`)
+- Optional notifications use `SLACK_WEBHOOK_URL`; set `PUBLIC_BASE_URL` so Slack can link to `/books?book=<hash>`; cover images use Hardcover's cached image URLs
 - Demo cover images downloaded to `demo-covers/` (gitignored, via `task demo-covers`)
 - Generated screenshots in `screenshots/` (committed)
 
@@ -83,4 +84,5 @@ Each user runs their own instance, configured with their Readest and Hardcover c
 - Dry-run updater (`internal/sync/dry_run.go`): decorator wrapping `ProgressUpdater` — reads pass through, writes are no-ops
 - Hardcover client implements both `BookFinder` and `ProgressUpdater` interfaces
 - `GetUserBook` queries are scoped to the authenticated user (user ID cached from `GetMe`)
+- Notifications use the `sync.Notifier` interface; Slack lives in `internal/notifications` and must remain best-effort
 - Tests use `httptest` servers, per-package mocks, `testify/require` + `testify/assert`

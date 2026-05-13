@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -36,14 +37,16 @@ func (m *mockReadestPuller) PullConfigs(_ context.Context, _ int64) ([]readest.D
 }
 
 type mockBookFinder struct {
-	bySlug    map[string]*hardcover.Book
-	bySlugErr error
-	byISBN13  map[string]*hardcover.Edition
-	byISBN10  map[string]*hardcover.Edition
-	search    []hardcover.Book
+	bySlug      map[string]*hardcover.Book
+	bySlugErr   error
+	bySlugCalls []string
+	byISBN13    map[string]*hardcover.Edition
+	byISBN10    map[string]*hardcover.Edition
+	search      []hardcover.Book
 }
 
 func (m *mockBookFinder) FindBookBySlug(_ context.Context, slug string) (*hardcover.Book, error) {
+	m.bySlugCalls = append(m.bySlugCalls, slug)
 	if m.bySlugErr != nil {
 		return nil, m.bySlugErr
 	}
@@ -104,8 +107,9 @@ type mockProgressUpdater struct {
 
 	statusesErr error
 
-	userBook   *hardcover.UserBook
-	getUserErr error
+	userBook         *hardcover.UserBook
+	getUserErr       error
+	getUserBookCalls []int
 
 	insertedUserBook    *hardcover.UserBook
 	insertUserBookErr   error
@@ -122,6 +126,61 @@ type mockProgressUpdater struct {
 	updatedRead         *hardcover.UserBookRead
 	updateUserReadErr   error
 	updateUserReadCalls []updateUserBookReadCall
+}
+
+type addedBookNotification struct {
+	book       state.BookState
+	autoLinked bool
+}
+
+type mockNotifier struct {
+	added     []addedBookNotification
+	completed []state.BookState
+	critical  []error
+	err       error
+}
+
+type syncingObserverNotifier struct {
+	engine           *Engine
+	called           bool
+	addedSyncing     bool
+	completedCalled  bool
+	completedSyncing bool
+}
+
+func (m *mockNotifier) NotifyBookAdded(_ context.Context, book state.BookState, autoLinked bool) error {
+	m.added = append(m.added, addedBookNotification{book: book, autoLinked: autoLinked})
+	return m.err
+}
+
+func (m *mockNotifier) NotifyBookCompleted(_ context.Context, book state.BookState) error {
+	m.completed = append(m.completed, book)
+	return m.err
+}
+
+func (m *mockNotifier) NotifyCriticalError(_ context.Context, err error) error {
+	m.critical = append(m.critical, err)
+	return m.err
+}
+
+func (n *syncingObserverNotifier) NotifyBookAdded(_ context.Context, _ state.BookState, _ bool) error {
+	n.engine.mu.Lock()
+	n.addedSyncing = n.engine.syncing
+	n.engine.mu.Unlock()
+	n.called = true
+	return nil
+}
+
+func (n *syncingObserverNotifier) NotifyBookCompleted(_ context.Context, _ state.BookState) error {
+	n.engine.mu.Lock()
+	n.completedSyncing = n.engine.syncing
+	n.engine.mu.Unlock()
+	n.completedCalled = true
+	return nil
+}
+
+func (n *syncingObserverNotifier) NotifyCriticalError(_ context.Context, _ error) error {
+	return nil
 }
 
 func (m *mockProgressUpdater) GetMe(_ context.Context) (*hardcover.MeResponse, error) {
@@ -142,7 +201,8 @@ func (m *mockProgressUpdater) GetStatuses(_ context.Context) ([]hardcover.BookSt
 	}, nil
 }
 
-func (m *mockProgressUpdater) GetUserBook(_ context.Context, _ int) (*hardcover.UserBook, error) {
+func (m *mockProgressUpdater) GetUserBook(_ context.Context, bookID int) (*hardcover.UserBook, error) {
+	m.getUserBookCalls = append(m.getUserBookCalls, bookID)
 	return m.userBook, m.getUserErr
 }
 
@@ -236,7 +296,7 @@ func metaWithISBN(isbn13 string) *string {
 // config with progress [350,700]. Matcher returns match. Verify InsertUserBook called
 // with status=2, InsertUserBookRead called with converted pages.
 func TestEngine_NewBook_Matched(t *testing.T) {
-	isbn := "9781234567890"
+	isbn := "9780987654321"
 	pages := 400
 	editionID := 10
 	edition := &hardcover.Edition{
@@ -300,6 +360,254 @@ func TestEngine_NewBook_Matched(t *testing.T) {
 	assert.Equal(t, 200, readCall.progressPages)
 }
 
+func TestEngine_NewBook_NotifyAutoLinked(t *testing.T) {
+	isbn := "9781234567890"
+	pages := 400
+	edition := &hardcover.Edition{
+		ID:     10,
+		BookID: 100,
+		Pages:  &pages,
+		ISBN13: isbn,
+	}
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash: "hashNotify",
+				Title:    "Notify Book",
+				Author:   "Notify Author",
+				Metadata: metaWithISBN(isbn),
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{
+		byISBN13: map[string]*hardcover.Edition{isbn: edition},
+	}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+	notifier := &mockNotifier{}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	engine := NewEngine(puller, finder, updater, st, NewMatcher(finder, false), newNopLogger(), false, &EngineOptions{
+		Notifier: notifier,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.added, 1)
+	assert.True(t, notifier.added[0].autoLinked)
+	assert.Equal(t, "Notify Book", notifier.added[0].book.Title)
+	assert.Equal(t, "isbn13", notifier.added[0].book.MatchMethod)
+}
+
+func TestEngine_NewBook_NotificationUsesBackfilledCover(t *testing.T) {
+	coverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("fake-cover"))
+	}))
+	defer coverSrv.Close()
+
+	isbn := "9781234567890"
+	pages := 400
+	edition := &hardcover.Edition{
+		ID:     10,
+		BookID: 100,
+		Pages:  &pages,
+		ISBN13: isbn,
+		Book: &hardcover.Book{
+			ID:   100,
+			Slug: "cover-backfilled-book",
+		},
+	}
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash: "hashBackfilledNotify",
+				Title:    "Backfilled Cover Notify",
+				Author:   "Notify Author",
+				Metadata: metaWithISBN(isbn),
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{
+		byISBN13: map[string]*hardcover.Edition{isbn: edition},
+		bySlug: map[string]*hardcover.Book{
+			"cover-backfilled-book": {
+				ID:   100,
+				Slug: "cover-backfilled-book",
+				CachedImage: &hardcover.CachedImage{
+					URL: coverSrv.URL + "/cover.jpg",
+				},
+			},
+		},
+	}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+	notifier := &mockNotifier{}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	engine := NewEngine(puller, finder, updater, st, NewMatcher(finder, false), newNopLogger(), false, &EngineOptions{
+		CoversDir: t.TempDir(),
+		Notifier:  notifier,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.added, 1)
+	assert.Equal(t, coverSrv.URL+"/cover.jpg", notifier.added[0].book.CoverURL)
+	assert.NotEmpty(t, notifier.added[0].book.CoverPath)
+}
+
+func TestEngine_NotificationsRunAfterSyncReleased(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash: "hashReleaseNotify",
+				Title:    "Release Notify",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	engine := NewEngine(puller, finder, updater, st, NewMatcher(finder, false), newNopLogger(), false, nil)
+	notifier := &syncingObserverNotifier{engine: engine}
+	engine.notifier = notifier
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.True(t, notifier.called)
+	assert.False(t, notifier.addedSyncing)
+}
+
+func TestEngine_CompletionNotificationsRunAfterSyncReleased(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashReleaseCompleteNotify",
+				Progress:  "[400,400]",
+				UpdatedAt: "2024-01-01T00:01:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	notifier := &syncingObserverNotifier{engine: engine}
+	engine.notifier = notifier
+	st.SetBook("hashReleaseCompleteNotify", state.BookState{
+		BookHash:          "hashReleaseCompleteNotify",
+		Title:             "Release Complete Notify",
+		HardcoverBookID:   100,
+		EditionID:         10,
+		EditionPages:      400,
+		UserBookID:        55,
+		UserBookEditionID: 10,
+		UserBookReadID:    99,
+		LastStatusSent:    hardcover.StatusCurrentlyReading,
+		LastProgressSent:  200,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.True(t, notifier.completedCalled)
+	assert.False(t, notifier.completedSyncing)
+}
+
+func TestEngine_NewBook_NotifyUnmatched(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash: "hashUnmatchedNotify",
+				Title:    "Unmatched Notify",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+	notifier := &mockNotifier{}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	engine := NewEngine(puller, finder, updater, st, NewMatcher(finder, false), newNopLogger(), false, &EngineOptions{
+		Notifier: notifier,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.added, 1)
+	assert.False(t, notifier.added[0].autoLinked)
+	assert.Equal(t, "Unmatched Notify", notifier.added[0].book.Title)
+	assert.True(t, notifier.added[0].book.Unmatched)
+}
+
+func TestEngine_NewBook_NotificationFailureDoesNotFailTick(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash: "hashNotifyFails",
+				Title:    "Notify Fails",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+	notifier := &mockNotifier{err: errors.New("slack unavailable")}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.added, 1)
+	assert.Empty(t, notifier.critical)
+	bs, ok := st.GetBook("hashNotifyFails")
+	require.True(t, ok)
+	assert.Equal(t, "Notify Fails", bs.Title)
+}
+
+func TestEngine_NewBook_DoesNotNotifyWhenSaveFails(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash: "hashSaveFails",
+				Title:    "Save Fails",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+	notifier := &mockNotifier{}
+	st := state.New(filepath.Join(t.TempDir(), "missing", "state.json"))
+	engine := NewEngine(puller, finder, updater, st, NewMatcher(finder, false), newNopLogger(), false, &EngineOptions{
+		Notifier: notifier,
+	})
+
+	err := engine.Tick(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "save sync state")
+
+	assert.Empty(t, notifier.added)
+	require.Len(t, notifier.critical, 1)
+	assert.Contains(t, notifier.critical[0].Error(), "save sync state")
+}
+
 // TestEngine_ProgressUpdate: State has matched book with UserBookID=1 and UserBookReadID=1.
 // PullConfigs returns updated progress. Verify UpdateUserBookRead called (not insert).
 func TestEngine_ProgressUpdate(t *testing.T) {
@@ -323,28 +631,66 @@ func TestEngine_ProgressUpdate(t *testing.T) {
 
 	// Pre-populate state with a matched book that already has UserBookID and UserBookReadID.
 	st.SetBook("hash2", state.BookState{
-		BookHash:         "hash2",
-		Title:            "Existing Book",
-		HardcoverBookID:  200,
-		HardcoverSlug:    "existing-book",
-		EditionID:        20,
-		EditionPages:     600,
-		UserBookID:       1,
-		UserBookReadID:   1,
-		LastStatusSent:   2,
-		LastProgressSent: 150,
+		BookHash:          "hash2",
+		Title:             "Existing Book",
+		HardcoverBookID:   200,
+		HardcoverSlug:     "existing-book",
+		EditionID:         20,
+		EditionPages:      600,
+		UserBookID:        1,
+		UserBookEditionID: 20,
+		UserBookReadID:    1,
+		LastStatusSent:    2,
+		LastProgressSent:  150,
 	})
 
 	err := engine.Tick(context.Background())
 	require.NoError(t, err)
 
 	// Verify UpdateUserBookRead was called, not InsertUserBookRead.
+	assert.Empty(t, updater.getUserBookCalls, "cached linkage should avoid an extra GetUserBook call")
 	assert.Empty(t, updater.insertUserReadCalls, "InsertUserBookRead should not be called")
 	require.Len(t, updater.updateUserReadCalls, 1)
 	updateCall := updater.updateUserReadCalls[0]
 	assert.Equal(t, 1, updateCall.id)
 	// ConvertProgress(300, 600, 600) = 300
 	assert.Equal(t, 300, updateCall.progressPages)
+}
+
+func TestEngine_ProgressUpdate_NoEditionCachedReadSkipsLookup(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashNoEdition",
+				Progress:  "[50,100]",
+				UpdatedAt: "2024-01-02T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashNoEdition", state.BookState{
+		BookHash:         "hashNoEdition",
+		Title:            "No Edition Book",
+		HardcoverBookID:  201,
+		EditionPages:     200,
+		UserBookID:       11,
+		UserBookReadID:   12,
+		LastStatusSent:   hardcover.StatusCurrentlyReading,
+		LastProgressSent: 50,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	assert.Empty(t, updater.getUserBookCalls, "cached no-edition linkage should avoid GetUserBook")
+	require.Len(t, updater.updateUserReadCalls, 1)
+	assert.Equal(t, 12, updater.updateUserReadCalls[0].id)
+	assert.Equal(t, 100, updater.updateUserReadCalls[0].progressPages)
 }
 
 // TestEngine_Finished: Config progress [700,700] or status "finished".
@@ -367,6 +713,8 @@ func TestEngine_Finished(t *testing.T) {
 	}
 
 	engine, st := newTestEngine(t, puller, finder, updater)
+	notifier := &mockNotifier{}
+	engine.notifier = notifier
 
 	// Pre-populate state.
 	st.SetBook("hash3", state.BookState{
@@ -396,6 +744,8 @@ func TestEngine_Finished(t *testing.T) {
 	bs, ok := st.GetBook("hash3")
 	require.True(t, ok)
 	assert.Equal(t, 3, bs.LastStatusSent)
+	require.Len(t, notifier.completed, 1)
+	assert.Equal(t, "Finished Book", notifier.completed[0].Title)
 }
 
 // TestEngine_SkipUnmatched: Matcher returns nil. Verify no Hardcover calls, book marked Unmatched in state.
@@ -464,21 +814,23 @@ func TestEngine_SkipDuplicateProgress(t *testing.T) {
 
 	// ConvertProgress(350, 700, 400) = 200, so last progress is already 200 with status 2.
 	st.SetBook("hash5", state.BookState{
-		BookHash:         "hash5",
-		Title:            "Same Progress Book",
-		HardcoverBookID:  500,
-		EditionID:        50,
-		EditionPages:     400,
-		UserBookID:       10,
-		UserBookReadID:   10,
-		LastStatusSent:   2,
-		LastProgressSent: 200, // same as what ConvertProgress would produce
+		BookHash:          "hash5",
+		Title:             "Same Progress Book",
+		HardcoverBookID:   500,
+		EditionID:         50,
+		EditionPages:      400,
+		UserBookID:        10,
+		UserBookEditionID: 50,
+		UserBookReadID:    10,
+		LastStatusSent:    2,
+		LastProgressSent:  200, // same as what ConvertProgress would produce
 	})
 
 	err := engine.Tick(context.Background())
 	require.NoError(t, err)
 
 	// No Hardcover calls should be made.
+	assert.Empty(t, updater.getUserBookCalls)
 	assert.Empty(t, updater.updateUserBookCalls)
 	assert.Empty(t, updater.updateUserReadCalls)
 	assert.Empty(t, updater.insertUserBookCalls)
@@ -951,8 +1303,75 @@ func TestEngine_ManualSync_TickUsesDryRun(t *testing.T) {
 	err = engine.Tick(context.Background())
 	require.NoError(t, err)
 
-	// In manual mode Tick uses dry-run: no real InsertUserBook calls.
+	// In manual mode Tick uses dry-run: read calls pass through, but writes do not.
 	assert.Empty(t, realUpdater.insertUserBookCalls, "manual mode Tick must not call real InsertUserBook")
+	assert.Empty(t, realUpdater.updateUserBookCalls, "manual mode Tick must not call real UpdateUserBook")
+	assert.Empty(t, realUpdater.insertUserReadCalls, "manual mode Tick must not call real InsertUserBookRead")
+	assert.Empty(t, realUpdater.updateUserReadCalls, "manual mode Tick must not call real UpdateUserBookRead")
+
+	bs, ok := st.GetBook("hashM1")
+	require.True(t, ok)
+	assert.Equal(t, [2]int{200, 400}, bs.ReadestProgress)
+	assert.Equal(t, hardcover.StatusNone, bs.LastStatusSent)
+	assert.Equal(t, 0, bs.LastProgressSent)
+	assert.Equal(t, 0, bs.UserBookID)
+}
+
+func TestEngine_ManualSync_CompletionNotificationUsesReconciledStatus(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashManualComplete",
+				Progress:  "[400,400]",
+				UpdatedAt: "2024-01-01T00:01:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	realUpdater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		userBook: &hardcover.UserBook{
+			ID:       55,
+			BookID:   100,
+			StatusID: hardcover.StatusCurrentlyReading,
+		},
+	}
+	notifier := &mockNotifier{}
+
+	f, err := os.CreateTemp(t.TempDir(), "state-*.json")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	st := state.New(f.Name())
+	matcher := NewMatcher(finder, false)
+	logger := newNopLogger()
+	engine := NewEngine(puller, finder, realUpdater, st, matcher, logger, true, &EngineOptions{
+		Notifier: notifier,
+	})
+	st.SetBook("hashManualComplete", state.BookState{
+		BookHash:         "hashManualComplete",
+		Title:            "Manual Complete",
+		HardcoverBookID:  100,
+		EditionID:        10,
+		EditionPages:     400,
+		UserBookID:       55,
+		UserBookReadID:   99,
+		LastStatusSent:   hardcover.StatusCurrentlyReading,
+		LastProgressSent: 200,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+	assert.Empty(t, notifier.completed, "dry-run polling should not notify completion")
+	bs, ok := st.GetBook("hashManualComplete")
+	require.True(t, ok)
+	assert.Equal(t, hardcover.StatusRead, bs.LastStatusSent, "dry-run polling records the pending read status locally")
+
+	require.NoError(t, engine.SyncNow(context.Background()))
+
+	require.Len(t, realUpdater.updateUserBookCalls, 1)
+	assert.Equal(t, hardcover.StatusRead, realUpdater.updateUserBookCalls[0].statusID)
+	require.Len(t, notifier.completed, 1)
+	assert.Equal(t, "Manual Complete", notifier.completed[0].Title)
 }
 
 // TestEngine_ConcurrentTick_SecondReturnsNil: Calling Tick while another is in
@@ -1282,6 +1701,7 @@ func TestEngine_ProcessBook_DownloadsCover(t *testing.T) {
 	bs, ok := st.GetBook("hashCover")
 	require.True(t, ok)
 	assert.NotEmpty(t, bs.CoverPath, "cover should have been downloaded")
+	assert.Equal(t, coverSrv.URL+"/cover.jpg", bs.CoverURL)
 }
 
 // TestEngine_BackfillCovers: Matched books without covers get them on next tick.
@@ -1339,7 +1759,17 @@ func TestEngine_BackfillCovers(t *testing.T) {
 		HardcoverBookID: 300,
 		HardcoverSlug:   "complete-book",
 		CoverPath:       "complete.jpg",
+		CoverURL:        "https://assets.example.com/complete.jpg",
 		Series:          "Some Series",
+		LastStatusSent:  2,
+	})
+	st.SetBook("hashStandaloneComplete", state.BookState{
+		BookHash:        "hashStandaloneComplete",
+		Title:           "Standalone Complete Book",
+		HardcoverBookID: 301,
+		HardcoverSlug:   "standalone-complete-book",
+		CoverPath:       "standalone-complete.jpg",
+		CoverURL:        "https://assets.example.com/standalone-complete.jpg",
 		LastStatusSent:  2,
 	})
 
@@ -1349,6 +1779,8 @@ func TestEngine_BackfillCovers(t *testing.T) {
 	bs, ok := st.GetBook("hashBackfill")
 	require.True(t, ok)
 	assert.NotEmpty(t, bs.CoverPath, "cover should have been backfilled")
+	assert.Equal(t, coverSrv.URL+"/cover.jpg", bs.CoverURL)
+	assert.NotContains(t, finder.bySlugCalls, "standalone-complete-book")
 }
 
 // TestEngine_BackfillCovers_NoCoverURL: Book without cover URL is skipped.
@@ -1568,6 +2000,121 @@ func TestEngine_GetStatuses_Error(t *testing.T) {
 	assert.Contains(t, err.Error(), "statuses unavailable")
 }
 
+func TestEngine_CriticalErrorNotificationOncePerDay(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		bookErr: errors.New("readest unavailable"),
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+
+	require.Error(t, engine.Tick(context.Background()))
+	require.Error(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.critical, 1)
+	assert.Contains(t, notifier.critical[0].Error(), "readest unavailable")
+}
+
+func TestEngine_CriticalErrorNotificationRepeatsNextDay(t *testing.T) {
+	notifier := &mockNotifier{}
+	currentTime := time.Date(2026, 5, 13, 12, 0, 0, 0, time.UTC)
+	engine := &Engine{
+		notifier: notifier,
+		logger:   newNopLogger(),
+		now: func() time.Time {
+			return currentTime
+		},
+	}
+	err := errors.New("readest unavailable")
+
+	engine.notifyCriticalError(context.Background(), err)
+	engine.notifyCriticalError(context.Background(), err)
+	currentTime = currentTime.Add(24 * time.Hour)
+	engine.notifyCriticalError(context.Background(), err)
+
+	require.Len(t, notifier.critical, 2)
+	assert.Contains(t, notifier.critical[0].Error(), "readest unavailable")
+	assert.Contains(t, notifier.critical[1].Error(), "readest unavailable")
+}
+
+func TestEngine_ContextCancellationDoesNotNotifyCriticalError(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		bookErr: context.Canceled,
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+
+	require.ErrorIs(t, engine.Tick(context.Background()), context.Canceled)
+
+	assert.Empty(t, notifier.critical)
+}
+
+func TestEngine_ContextDeadlineDoesNotNotifyCriticalError(t *testing.T) {
+	puller := &mockReadestPuller{
+		books:   []readest.DBBook{},
+		bookErr: context.DeadlineExceeded,
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+
+	engine, _ := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+
+	require.ErrorIs(t, engine.SyncNow(context.Background()), context.DeadlineExceeded)
+
+	assert.Empty(t, notifier.critical)
+}
+
+func TestEngine_CriticalErrorNotificationOncePerDayPerError(t *testing.T) {
+	notifier := &mockNotifier{}
+	engine := &Engine{
+		notifier: notifier,
+		logger:   newNopLogger(),
+	}
+
+	engine.notifyCriticalError(context.Background(), errors.New("readest unavailable"))
+	engine.notifyCriticalError(context.Background(), errors.New("readest unavailable"))
+	engine.notifyCriticalError(context.Background(), errors.New("hardcover unavailable"))
+
+	require.Len(t, notifier.critical, 2)
+	assert.Contains(t, notifier.critical[0].Error(), "readest unavailable")
+	assert.Contains(t, notifier.critical[1].Error(), "hardcover unavailable")
+}
+
+func TestEngine_CriticalErrorNotificationFailureDoesNotConsumeThrottle(t *testing.T) {
+	notifier := &mockNotifier{err: errors.New("slack unavailable")}
+	engine := &Engine{
+		notifier: notifier,
+		logger:   newNopLogger(),
+	}
+
+	err := errors.New("readest unavailable")
+	engine.notifyCriticalError(context.Background(), err)
+	notifier.err = nil
+	engine.notifyCriticalError(context.Background(), err)
+	engine.notifyCriticalError(context.Background(), err)
+
+	require.Len(t, notifier.critical, 2)
+	assert.Contains(t, notifier.critical[0].Error(), "readest unavailable")
+	assert.Contains(t, notifier.critical[1].Error(), "readest unavailable")
+}
+
 // TestEngine_ProcessConfig_NoEditionPages: EditionPages == 0 — should update status
 // but skip progress update.
 func TestEngine_ProcessConfig_NoEditionPages(t *testing.T) {
@@ -1605,6 +2152,124 @@ func TestEngine_ProcessConfig_NoEditionPages(t *testing.T) {
 	// No progress read calls.
 	assert.Empty(t, updater.insertUserReadCalls, "no InsertUserBookRead when EditionPages==0")
 	assert.Empty(t, updater.updateUserReadCalls, "no UpdateUserBookRead when EditionPages==0")
+}
+
+func TestEngine_ProcessConfig_NoEditionPages_NotifiesCompleted(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashNPDone",
+				Progress:  "[400,400]",
+				UpdatedAt: "2024-03-01T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+	st.SetBook("hashNPDone", state.BookState{
+		BookHash:        "hashNPDone",
+		Title:           "No Pages Done",
+		HardcoverBookID: 701,
+		EditionID:       71,
+		EditionPages:    0,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err)
+
+	require.Len(t, updater.insertUserBookCalls, 1)
+	assert.Equal(t, hardcover.StatusRead, updater.insertUserBookCalls[0].statusID)
+	assert.Empty(t, updater.insertUserReadCalls)
+	require.Len(t, notifier.completed, 1)
+	assert.Equal(t, "No Pages Done", notifier.completed[0].Title)
+}
+
+func TestEngine_CompletedNotificationFailureDoesNotFailTick(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashCompleteNotifyFails",
+				Progress:  "[400,400]",
+				UpdatedAt: "2024-03-01T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{err: errors.New("slack unavailable")}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+	st.SetBook("hashCompleteNotifyFails", state.BookState{
+		BookHash:          "hashCompleteNotifyFails",
+		Title:             "Complete Notify Fails",
+		HardcoverBookID:   703,
+		EditionID:         73,
+		EditionPages:      400,
+		UserBookID:        55,
+		UserBookEditionID: 73,
+		UserBookReadID:    99,
+		LastStatusSent:    hardcover.StatusCurrentlyReading,
+		LastProgressSent:  200,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.completed, 1)
+	assert.Empty(t, notifier.critical)
+	bs, ok := st.GetBook("hashCompleteNotifyFails")
+	require.True(t, ok)
+	assert.Equal(t, hardcover.StatusRead, bs.LastStatusSent)
+	assert.Equal(t, 400, bs.LastProgressSent)
+}
+
+func TestEngine_ProcessConfig_DoesNotNotifyCompletedWhenSaveFails(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashCompleteSaveFails",
+				Progress:  "[400,400]",
+				UpdatedAt: "2024-03-01T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+	st := state.New(filepath.Join(t.TempDir(), "missing", "state.json"))
+	engine := NewEngine(puller, finder, updater, st, NewMatcher(finder, false), newNopLogger(), false, &EngineOptions{
+		Notifier: notifier,
+	})
+	st.SetBook("hashCompleteSaveFails", state.BookState{
+		BookHash:        "hashCompleteSaveFails",
+		Title:           "Complete Save Fails",
+		HardcoverBookID: 702,
+		EditionID:       72,
+		EditionPages:    0,
+	})
+
+	err := engine.Tick(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "save sync state")
+
+	require.Len(t, updater.insertUserBookCalls, 1)
+	assert.Equal(t, hardcover.StatusRead, updater.insertUserBookCalls[0].statusID)
+	assert.Empty(t, notifier.completed)
+	require.Len(t, notifier.critical, 1)
+	assert.Contains(t, notifier.critical[0].Error(), "save sync state")
 }
 
 // TestEngine_ProcessConfig_ExistingUserBook: GetUserBook returns an existing record —
@@ -1649,12 +2314,13 @@ func TestEngine_ProcessConfig_ExistingUserBook(t *testing.T) {
 
 func TestEngine_ProcessConfig_UsesExistingReadForLinkedEdition(t *testing.T) {
 	editionID := 80
+	existingProgress := 25
 	existingUserBook := &hardcover.UserBook{
 		ID:       55,
 		BookID:   800,
 		StatusID: hardcover.StatusWantToRead,
 		UserBookReads: []hardcover.UserBookRead{
-			{ID: 123, EditionID: &editionID},
+			{ID: 123, EditionID: &editionID, ProgressPages: &existingProgress},
 		},
 	}
 	puller := &mockReadestPuller{
@@ -1922,6 +2588,48 @@ func TestEngine_ProcessConfig_UpdateUserBook_Error(t *testing.T) {
 
 	err := engine.Tick(context.Background())
 	require.NoError(t, err) // error is logged, Tick itself succeeds
+}
+
+func TestEngine_ProcessConfig_UpdateUserBookRead_Error(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashUUBRErr",
+				Progress:  "[200,400]",
+				UpdatedAt: "2024-03-05T00:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse:        &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		updateUserReadErr: errors.New("update user book read failed"),
+	}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	st.SetBook("hashUUBRErr", state.BookState{
+		BookHash:          "hashUUBRErr",
+		Title:             "Update Read Error Book",
+		HardcoverBookID:   903,
+		EditionID:         93,
+		EditionPages:      400,
+		UserBookID:        21,
+		UserBookEditionID: 93,
+		UserBookReadID:    22,
+		LastStatusSent:    hardcover.StatusCurrentlyReading,
+		LastProgressSent:  100,
+	})
+
+	err := engine.Tick(context.Background())
+	require.NoError(t, err) // error is logged, Tick itself succeeds
+
+	require.Len(t, updater.updateUserReadCalls, 1)
+	assert.Equal(t, 22, updater.updateUserReadCalls[0].id)
+	assert.Equal(t, 200, updater.updateUserReadCalls[0].progressPages)
+	bs, ok := st.GetBook("hashUUBRErr")
+	require.True(t, ok)
+	assert.Equal(t, 100, bs.LastProgressSent, "failed read update must not be recorded as sent")
 }
 
 // TestEngine_TimestampFromRecords: PullBooks returns records with updated_at times.

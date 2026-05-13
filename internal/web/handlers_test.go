@@ -667,6 +667,9 @@ func TestHandleUnlink_Success(t *testing.T) {
 		UserBookReadID:   55,
 		LastStatusSent:   2,
 		LastProgressSent: 150,
+		Series:           "Linked Series #1",
+		CoverURL:         "https://assets.example.com/linked-cover.jpg",
+		CoverPath:        "linked-cover.jpg",
 	})
 	h := newTestHandlers(st)
 
@@ -710,6 +713,15 @@ func TestHandleUnlink_Success(t *testing.T) {
 	}
 	if book.ReadingFormatID != 0 {
 		t.Errorf("expected ReadingFormatID=0 after unlink, got %d", book.ReadingFormatID)
+	}
+	if book.Series != "" {
+		t.Errorf("expected Series cleared after unlink, got %q", book.Series)
+	}
+	if book.CoverURL != "" {
+		t.Errorf("expected CoverURL cleared after unlink, got %q", book.CoverURL)
+	}
+	if book.CoverPath != "" {
+		t.Errorf("expected CoverPath cleared after unlink, got %q", book.CoverPath)
 	}
 	// Preserved fields.
 	if book.Title != "Linked Book" {
@@ -1727,8 +1739,67 @@ func TestHandleLink_WithCoverDownload(t *testing.T) {
 	if book.CoverPath == "" {
 		t.Error("expected cover to be downloaded")
 	}
+	if book.CoverURL != coverSrv.URL+"/cover.jpg" {
+		t.Errorf("expected CoverURL to be stored, got %q", book.CoverURL)
+	}
 	if book.Series == "" {
 		t.Error("expected series to be set")
+	}
+}
+
+func TestHandleLink_ClearsStaleCoverMetadata(t *testing.T) {
+	st := makeState(t)
+	st.SetBook("coverlesshash", state.BookState{
+		BookHash:        "coverlesshash",
+		Title:           "Coverless Relink",
+		Author:          "Author C",
+		HardcoverBookID: 44,
+		HardcoverSlug:   "old-book",
+		Series:          "Old Series #1",
+		CoverURL:        "https://assets.example.com/old-cover.jpg",
+		CoverPath:       "old-cover.jpg",
+	})
+	finder := &stubFinder{
+		slugBook: &hardcover.Book{
+			ID:   56,
+			Slug: "coverless-test",
+		},
+	}
+	h := newTestHandlersWithFinder(st, finder)
+	h.engine = nil
+
+	form := url.Values{
+		"book_id":       {"56"},
+		"slug":          {"coverless-test"},
+		"edition_id":    {"101"},
+		"edition_pages": {"201"},
+	}
+	req := httptest.NewRequest(http.MethodPost, "/books/coverlesshash/link",
+		strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req = setPathValue(req, "POST /books/{hash}/link")
+	rr := httptest.NewRecorder()
+	h.handleLink(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rr.Code, rr.Body.String())
+	}
+
+	book, ok := st.GetBook("coverlesshash")
+	if !ok {
+		t.Fatal("book should exist")
+	}
+	if book.HardcoverBookID != 56 {
+		t.Errorf("expected HardcoverBookID=56, got %d", book.HardcoverBookID)
+	}
+	if book.CoverURL != "" {
+		t.Errorf("expected CoverURL to be cleared, got %q", book.CoverURL)
+	}
+	if book.CoverPath != "" {
+		t.Errorf("expected CoverPath to be cleared, got %q", book.CoverPath)
+	}
+	if book.Series != "" {
+		t.Errorf("expected Series to be cleared, got %q", book.Series)
 	}
 }
 

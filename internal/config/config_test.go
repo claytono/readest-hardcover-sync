@@ -13,9 +13,9 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"READEST_EMAIL", "READEST_PASSWORD", "HARDCOVER_TOKEN",
-		"SYNC_INTERVAL", "LISTEN_ADDR", "STATE_FILE",
+		"SYNC_INTERVAL", "LISTEN_ADDR", "PUBLIC_BASE_URL", "STATE_FILE",
 		"ENABLE_TITLE_MATCH", "MANUAL_SYNC", "COVERS_DIR",
-		"MIN_SYNC_PERCENT", "MIN_SYNC_PAGES",
+		"MIN_SYNC_PERCENT", "MIN_SYNC_PAGES", "SLACK_WEBHOOK_URL",
 	} {
 		t.Setenv(k, "")
 	}
@@ -42,12 +42,14 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	t.Setenv("HARDCOVER_TOKEN", "tok")
 	t.Setenv("SYNC_INTERVAL", "5m")
 	t.Setenv("LISTEN_ADDR", ":9090")
+	t.Setenv("PUBLIC_BASE_URL", "https://readest.example.com")
 	t.Setenv("STATE_FILE", "/tmp/s.json")
 	t.Setenv("ENABLE_TITLE_MATCH", "true")
 	t.Setenv("MANUAL_SYNC", "true")
 	t.Setenv("COVERS_DIR", "/tmp/covers")
 	t.Setenv("MIN_SYNC_PERCENT", "3.5")
 	t.Setenv("MIN_SYNC_PAGES", "10")
+	t.Setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.com/services/test")
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -56,11 +58,13 @@ func TestLoad_AllEnvVars(t *testing.T) {
 	assert.Equal(t, "pass", cfg.ReadestPassword)
 	assert.Equal(t, "tok", cfg.HardcoverToken)
 	assert.Equal(t, ":9090", cfg.ListenAddr)
+	assert.Equal(t, "https://readest.example.com", cfg.PublicBaseURL)
 	assert.Equal(t, "/tmp/s.json", cfg.StateFile)
 	assert.True(t, cfg.EnableTitleMatch)
 	assert.True(t, cfg.ManualSync)
 	assert.Equal(t, 3.5, cfg.MinSyncPercent)
 	assert.Equal(t, 10, cfg.MinSyncPages)
+	assert.Equal(t, "https://hooks.slack.com/services/test", cfg.SlackWebhookURL)
 }
 
 func TestLoad_InvalidSyncInterval(t *testing.T) {

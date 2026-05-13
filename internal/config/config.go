@@ -13,8 +13,10 @@ type Config struct {
 	HardcoverToken   string
 	SyncInterval     time.Duration
 	ListenAddr       string
+	PublicBaseURL    string
 	StateFile        string
 	CoversDir        string
+	SlackWebhookURL  string
 	EnableTitleMatch bool
 	ManualSync       bool
 	MinSyncPercent   float64 // minimum progress % before syncing (default 2)
@@ -26,6 +28,8 @@ func Load() (*Config, error) {
 		ReadestEmail:     os.Getenv("READEST_EMAIL"),
 		ReadestPassword:  os.Getenv("READEST_PASSWORD"),
 		HardcoverToken:   os.Getenv("HARDCOVER_TOKEN"),
+		PublicBaseURL:    os.Getenv("PUBLIC_BASE_URL"),
+		SlackWebhookURL:  os.Getenv("SLACK_WEBHOOK_URL"),
 		SyncInterval:     10 * time.Minute,
 		ListenAddr:       ":8080",
 		StateFile:        "state.json",

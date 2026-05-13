@@ -5,6 +5,7 @@ import (
 
 	"github.com/claytono/readest-hardcover-sync/internal/hardcover"
 	"github.com/claytono/readest-hardcover-sync/internal/readest"
+	"github.com/claytono/readest-hardcover-sync/internal/state"
 )
 
 // ReadestPuller fetches books and configs from the Readest sync API.
@@ -30,4 +31,12 @@ type ProgressUpdater interface {
 	UpdateUserBook(ctx context.Context, id int, statusID int, editionID *int) (*hardcover.UserBook, error)
 	InsertUserBookRead(ctx context.Context, userBookID, progressPages int, editionID *int, startedAt string, finishedAt *string) (*hardcover.UserBookRead, error)
 	UpdateUserBookRead(ctx context.Context, id int, progressPages int, finishedAt *string) (*hardcover.UserBookRead, error)
+}
+
+// Notifier publishes user-facing sync notifications. Implementations should be
+// best-effort; notification failures must not block syncing.
+type Notifier interface {
+	NotifyBookAdded(ctx context.Context, book state.BookState, autoLinked bool) error
+	NotifyBookCompleted(ctx context.Context, book state.BookState) error
+	NotifyCriticalError(ctx context.Context, err error) error
 }
