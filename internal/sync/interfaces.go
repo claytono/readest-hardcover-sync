@@ -38,5 +38,6 @@ type ProgressUpdater interface {
 type Notifier interface {
 	NotifyBookAdded(ctx context.Context, book state.BookState, autoLinked bool) error
 	NotifyBookCompleted(ctx context.Context, book state.BookState) error
+	NotifyBookStartedUnlinked(ctx context.Context, book state.BookState) error
 	NotifyCriticalError(ctx context.Context, err error) error
 }

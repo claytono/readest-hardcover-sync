@@ -521,6 +521,7 @@ func (h *handlers) handleUnlink(w http.ResponseWriter, r *http.Request) {
 		b.LastStatusSent = 0
 		b.LastProgressSent = 0
 		b.ReadingFormatID = 0
+		b.UnlinkedReadingNotificationPending = false
 		b.Unmatched = true
 		b.Series = ""
 		b.CoverURL = ""

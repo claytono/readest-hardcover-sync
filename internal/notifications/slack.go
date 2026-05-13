@@ -79,6 +79,14 @@ func (s *Slack) NotifyBookAdded(ctx context.Context, book state.BookState, autoL
 	if !autoLinked {
 		header = "Action needed"
 	}
+	if !autoLinked && book.UnlinkedReadingNotificationPending {
+		return s.post(ctx, s.bookPayloadWithPrefix(
+			":warning:",
+			header,
+			book,
+			[]string{unlinkedReadingLine},
+		))
+	}
 	return s.post(ctx, s.bookPayload(
 		header,
 		book,
@@ -96,6 +104,16 @@ func (s *Slack) NotifyBookCompleted(ctx context.Context, book state.BookState) e
 		"Book marked complete",
 		book,
 		lines,
+	))
+}
+
+// NotifyBookStartedUnlinked sends a warning when an unlinked book enters reading.
+func (s *Slack) NotifyBookStartedUnlinked(ctx context.Context, book state.BookState) error {
+	return s.post(ctx, s.bookPayloadWithPrefix(
+		":warning:",
+		"Action needed",
+		book,
+		[]string{unlinkedReadingLine},
 	))
 }
 
@@ -117,9 +135,17 @@ type slackPayload struct {
 	Blocks []map[string]any `json:"blocks,omitempty"`
 }
 
+const unlinkedReadingLine = "Readest shows reading activity, but this book is not linked to Hardcover. Open the book and choose a Hardcover match."
+
 func (s *Slack) bookPayload(header string, book state.BookState, lines []string) slackPayload {
+	return s.bookPayloadWithPrefix("", header, book, lines)
+}
+
+func (s *Slack) bookPayloadWithPrefix(prefix, header string, book state.BookState, lines []string) slackPayload {
 	body := s.bookMessageText(header, book, lines)
-	if s.coverURL(book) == "" {
+	if prefix != "" {
+		body = prefix + " " + body
+	} else if s.coverURL(book) == "" {
 		body = ":question: " + body
 	}
 

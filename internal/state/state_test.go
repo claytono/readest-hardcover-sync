@@ -1,8 +1,10 @@
 package state
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,24 +33,25 @@ func TestState_SaveAndReload(t *testing.T) {
 	s.SetLastBookSync(1234567890)
 	s.SetLastConfigSync(9876543210)
 	s.SetBook("hash1", BookState{
-		BookHash:          "hash1",
-		Title:             "Test Book",
-		Author:            "Test Author",
-		HardcoverBookID:   42,
-		HardcoverSlug:     "test-book",
-		EditionID:         99,
-		EditionPages:      300,
-		ReadingFormatID:   1,
-		MatchMethod:       "isbn",
-		UserBookID:        10,
-		UserBookEditionID: 99,
-		UserBookReadID:    20,
-		LastStatusSent:    2,
-		LastProgressSent:  150,
-		ReadestProgress:   [2]int{150, 300},
-		ReadestStatus:     "reading",
-		Unmatched:         false,
-		LastError:         "",
+		BookHash:                           "hash1",
+		Title:                              "Test Book",
+		Author:                             "Test Author",
+		HardcoverBookID:                    42,
+		HardcoverSlug:                      "test-book",
+		EditionID:                          99,
+		EditionPages:                       300,
+		ReadingFormatID:                    1,
+		MatchMethod:                        "isbn",
+		UserBookID:                         10,
+		UserBookEditionID:                  99,
+		UserBookReadID:                     20,
+		LastStatusSent:                     2,
+		LastProgressSent:                   150,
+		ReadestProgress:                    [2]int{150, 300},
+		ReadestStatus:                      "reading",
+		UnlinkedReadingNotificationPending: true,
+		Unmatched:                          false,
+		LastError:                          "",
 	})
 	s.SetBook("hash2", BookState{
 		BookHash:  "hash2",
@@ -86,6 +89,7 @@ func TestState_SaveAndReload(t *testing.T) {
 	assert.Equal(t, 150, b1.LastProgressSent)
 	assert.Equal(t, [2]int{150, 300}, b1.ReadestProgress)
 	assert.Equal(t, "reading", b1.ReadestStatus)
+	assert.True(t, b1.UnlinkedReadingNotificationPending)
 	assert.False(t, b1.Unmatched)
 
 	b2, ok := s2.GetBook("hash2")
@@ -113,6 +117,53 @@ func TestState_AtomicWrite(t *testing.T) {
 	// The real file should exist
 	_, err = os.Stat(path)
 	require.NoError(t, err)
+}
+
+func TestState_SaveConcurrentCalls(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s := New(path)
+	for i := range 100 {
+		hash := fmt.Sprintf("hash-%03d", i)
+		s.SetBook(hash, BookState{
+			BookHash: hash,
+			Title:    fmt.Sprintf("Book %03d", i),
+			Author:   "Concurrent Save",
+		})
+	}
+
+	const goroutines = 16
+	const savesPerGoroutine = 25
+
+	start := make(chan struct{})
+	errs := make(chan error, goroutines*savesPerGoroutine)
+	var wg sync.WaitGroup
+	for i := range goroutines {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			<-start
+			for j := range savesPerGoroutine {
+				s.SetLastConfigSync(int64(id*savesPerGoroutine + j))
+				errs <- s.Save()
+			}
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	_, err := os.Stat(path + ".tmp")
+	assert.True(t, os.IsNotExist(err), "tmp file should not exist after concurrent saves")
+
+	reloaded := New(path)
+	require.NoError(t, reloaded.Load())
+	assert.Len(t, reloaded.ListBooks(), 100)
 }
 
 func TestState_GetSetBook(t *testing.T) {
@@ -150,12 +201,13 @@ func TestState_SetManualLink(t *testing.T) {
 
 	s := New(path)
 	s.SetBook("hash1", BookState{
-		BookHash:  "hash1",
-		Title:     "Some Book",
-		Unmatched: true,
-		Series:    "Old Series #1",
-		CoverURL:  "https://assets.example.com/old-cover.jpg",
-		CoverPath: "old-cover.jpg",
+		BookHash:                           "hash1",
+		Title:                              "Some Book",
+		Unmatched:                          true,
+		UnlinkedReadingNotificationPending: true,
+		Series:                             "Old Series #1",
+		CoverURL:                           "https://assets.example.com/old-cover.jpg",
+		CoverPath:                          "old-cover.jpg",
 	})
 
 	s.SetManualLink("hash1", 55, "some-book", 200, 400)
@@ -168,6 +220,7 @@ func TestState_SetManualLink(t *testing.T) {
 	assert.Equal(t, 400, b.EditionPages)
 	assert.Equal(t, "manual", b.MatchMethod)
 	assert.False(t, b.Unmatched)
+	assert.False(t, b.UnlinkedReadingNotificationPending)
 	assert.Empty(t, b.Series)
 	assert.Empty(t, b.CoverURL)
 	assert.Empty(t, b.CoverPath)

@@ -62,6 +62,20 @@ type bookCompletedNotification struct {
 	book state.BookState
 }
 
+type bookUnlinkedReadingNotification struct {
+	bookHash string
+}
+
+type bookProcessNotifications struct {
+	added           *bookAddedNotification
+	unlinkedReading *bookUnlinkedReadingNotification
+}
+
+type configProcessNotifications struct {
+	completed       *bookCompletedNotification
+	unlinkedReading *bookUnlinkedReadingNotification
+}
+
 // NewEngine constructs an Engine with the given dependencies.
 // If manualSync is true, the polling loop uses a dry-run updater (reads only),
 // and SyncNow() must be called to push changes to Hardcover.
@@ -215,6 +229,7 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 	var newBooks, updatedBooks int
 	var pendingBookNotifications []bookAddedNotification
 	var pendingCompletionNotifications []bookCompletedNotification
+	var pendingUnlinkedReadingNotifications []bookUnlinkedReadingNotification
 	for _, book := range books {
 		if book.DeletedAt != nil {
 			continue
@@ -224,12 +239,17 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 			maxBookUpdatedAt = ts
 		}
 		_, exists := e.state.GetBook(book.BookHash)
-		notification, err := e.processBook(ctx, book)
+		notifications, err := e.processBook(ctx, book)
 		if err != nil {
 			e.logger.Error("failed to process book", "book_hash", book.BookHash, "title", book.Title, "error", err)
 			e.emit(SyncEvent{Type: "error", Title: book.Title, Detail: err.Error()})
-		} else if notification != nil {
-			pendingBookNotifications = append(pendingBookNotifications, *notification)
+		} else {
+			if notifications.added != nil {
+				pendingBookNotifications = append(pendingBookNotifications, *notifications.added)
+			}
+			if notifications.unlinkedReading != nil {
+				pendingUnlinkedReadingNotifications = append(pendingUnlinkedReadingNotifications, *notifications.unlinkedReading)
+			}
 		}
 		if exists {
 			updatedBooks++
@@ -253,12 +273,17 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		if ts > maxConfigUpdatedAt {
 			maxConfigUpdatedAt = ts
 		}
-		notification, err := e.processConfig(ctx, cfg, updater)
+		notifications, err := e.processConfig(ctx, cfg, updater)
 		if err != nil {
 			e.logger.Error("failed to process config", "book_hash", cfg.BookHash, "error", err)
 			e.emit(SyncEvent{Type: "error", Detail: err.Error()})
-		} else if notification != nil {
-			pendingCompletionNotifications = append(pendingCompletionNotifications, *notification)
+		} else {
+			if notifications.completed != nil {
+				pendingCompletionNotifications = append(pendingCompletionNotifications, *notifications.completed)
+			}
+			if notifications.unlinkedReading != nil {
+				pendingUnlinkedReadingNotifications = append(pendingUnlinkedReadingNotifications, *notifications.unlinkedReading)
+			}
 		}
 	}
 
@@ -279,15 +304,27 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 			BookHash: bs.BookHash,
 			Progress: fmt.Sprintf("[%d, %d]", bs.ReadestProgress[0], bs.ReadestProgress[1]),
 		}
-		notification, err := e.processConfig(ctx, synthCfg, updater)
+		notifications, err := e.processConfig(ctx, synthCfg, updater)
 		if err != nil {
 			e.logger.Error("failed to sync pending progress", "book_hash", bs.BookHash, "title", bs.Title, "error", err)
-		} else if notification != nil {
-			pendingCompletionNotifications = append(pendingCompletionNotifications, *notification)
+		} else {
+			if notifications.completed != nil {
+				pendingCompletionNotifications = append(pendingCompletionNotifications, *notifications.completed)
+			}
+			if notifications.unlinkedReading != nil {
+				pendingUnlinkedReadingNotifications = append(pendingUnlinkedReadingNotifications, *notifications.unlinkedReading)
+			}
 		}
 	}
 
-	// Step 5: Download missing covers for matched books.
+	// Step 5: Retry pending unlinked-reading warnings until one is delivered.
+	for _, bs := range e.state.ListBooks() {
+		if unlinkedReadingNotificationReady(bs, e.minSyncPercent, e.minSyncPages) {
+			pendingUnlinkedReadingNotifications = append(pendingUnlinkedReadingNotifications, bookUnlinkedReadingNotification{bookHash: bs.BookHash})
+		}
+	}
+
+	// Step 6: Download missing covers for matched books.
 	if e.coversDir != "" {
 		for _, bs := range e.state.ListBooks() {
 			if bs.HardcoverBookID == 0 || bs.HardcoverSlug == "" {
@@ -338,7 +375,7 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		}
 	}
 
-	// Step 6: Update state timestamps from max updated_at of returned records.
+	// Step 7: Update state timestamps from max updated_at of returned records.
 	if maxBookUpdatedAt > e.state.GetLastBookSync() {
 		e.state.SetLastBookSync(maxBookUpdatedAt)
 	}
@@ -346,7 +383,7 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		e.state.SetLastConfigSync(maxConfigUpdatedAt)
 	}
 
-	// Step 6: Save state.
+	// Step 8: Save state.
 	// Recount after processing.
 	allBooks = e.state.ListBooks()
 	matchedCount = 0
@@ -369,31 +406,58 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		return fmt.Errorf("save sync state: %w", err)
 	}
 	releaseSync()
+	addedNotificationHashes := make(map[string]struct{}, len(pendingBookNotifications))
 	for _, notification := range pendingBookNotifications {
+		addedNotificationHashes[notification.bookHash] = struct{}{}
 		book, ok := e.state.GetBook(notification.bookHash)
 		if !ok {
 			continue
 		}
-		e.notifyBookAdded(ctx, book, notification.autoLinked)
+		if e.notifyBookAdded(ctx, book, notification.autoLinked) && book.UnlinkedReadingNotificationPending {
+			e.markUnlinkedReadingNotificationSent(notification.bookHash)
+		}
 	}
 	for _, notification := range pendingCompletionNotifications {
 		e.notifyBookCompleted(ctx, notification.book)
+	}
+	attemptedUnlinkedReadingNotifications := make(map[string]struct{}, len(pendingUnlinkedReadingNotifications))
+	for _, notification := range pendingUnlinkedReadingNotifications {
+		if _, alreadyNotifiedAsAdded := addedNotificationHashes[notification.bookHash]; alreadyNotifiedAsAdded {
+			continue
+		}
+		if _, alreadyAttempted := attemptedUnlinkedReadingNotifications[notification.bookHash]; alreadyAttempted {
+			continue
+		}
+		attemptedUnlinkedReadingNotifications[notification.bookHash] = struct{}{}
+		book, ok := e.state.GetBook(notification.bookHash)
+		if !ok {
+			continue
+		}
+		if !unlinkedReadingNotificationReady(book, e.minSyncPercent, e.minSyncPages) {
+			continue
+		}
+		if e.notifyBookStartedUnlinked(ctx, book) {
+			e.markUnlinkedReadingNotificationSent(notification.bookHash)
+		}
 	}
 	return nil
 }
 
 // processBook handles a single DBBook: updates existing state or matches and creates new entry.
-func (e *Engine) processBook(ctx context.Context, book readest.DBBook) (*bookAddedNotification, error) {
+func (e *Engine) processBook(ctx context.Context, book readest.DBBook) (bookProcessNotifications, error) {
 	// If already in state, just update ReadestStatus if changed.
-	if _, ok := e.state.GetBook(book.BookHash); ok {
+	var notifications bookProcessNotifications
+	if e.state.UpdateBook(book.BookHash, func(bs *state.BookState) {
+		previousStatusID := DeriveStatus(bs.ReadestProgress[0], bs.ReadestProgress[1], bs.ReadestStatus, e.minSyncPercent, e.minSyncPages)
 		if book.ReadingStatus != "" {
-			e.state.UpdateBook(book.BookHash, func(b *state.BookState) {
-				if b.ReadestStatus != book.ReadingStatus {
-					b.ReadestStatus = book.ReadingStatus
-				}
-			})
+			bs.ReadestStatus = book.ReadingStatus
 		}
-		return nil, nil
+		currentStatusID := DeriveStatus(bs.ReadestProgress[0], bs.ReadestProgress[1], bs.ReadestStatus, e.minSyncPercent, e.minSyncPages)
+		if updateUnlinkedReadingNotificationState(bs, previousStatusID, currentStatusID) {
+			notifications.unlinkedReading = &bookUnlinkedReadingNotification{bookHash: bs.BookHash}
+		}
+	}) {
+		return notifications, nil
 	}
 
 	// Parse identifiers from metadata, title, author.
@@ -402,7 +466,7 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) (*bookAdd
 	// Match via matcher.
 	result, err := e.matcher.Match(ctx, ids)
 	if err != nil {
-		return nil, fmt.Errorf("match book %q: %w", book.BookHash, err)
+		return bookProcessNotifications{}, fmt.Errorf("match book %q: %w", book.BookHash, err)
 	}
 
 	bs := state.BookState{
@@ -439,25 +503,35 @@ func (e *Engine) processBook(ctx context.Context, book readest.DBBook) (*bookAdd
 		}
 	}
 
+	notifications = bookProcessNotifications{
+		added: &bookAddedNotification{bookHash: book.BookHash, autoLinked: result != nil},
+	}
+	if result == nil {
+		currentStatusID := DeriveStatus(bs.ReadestProgress[0], bs.ReadestProgress[1], bs.ReadestStatus, e.minSyncPercent, e.minSyncPages)
+		if updateUnlinkedReadingNotificationState(&bs, hardcover.StatusNone, currentStatusID) {
+			notifications.unlinkedReading = &bookUnlinkedReadingNotification{bookHash: bs.BookHash}
+		}
+	}
 	e.state.SetBook(book.BookHash, bs)
-	return &bookAddedNotification{bookHash: book.BookHash, autoLinked: result != nil}, nil
+	return notifications, nil
 }
 
 // processConfig handles a single DBBookConfig: updates progress/status on Hardcover.
-func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, updater ProgressUpdater) (*bookCompletedNotification, error) {
+func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, updater ProgressUpdater) (configProcessNotifications, error) {
 	// Get book from state; skip if not in state at all.
 	bs, ok := e.state.GetBook(cfg.BookHash)
 	if !ok {
-		return nil, nil
+		return configProcessNotifications{}, nil
 	}
 
 	// Parse progress.
 	progress, err := readest.ParseConfigProgress(cfg.Progress)
 	if err != nil {
-		return nil, fmt.Errorf("parse progress for book %q: %w", cfg.BookHash, err)
+		return configProcessNotifications{}, fmt.Errorf("parse progress for book %q: %w", cfg.BookHash, err)
 	}
 
 	current, total := progress[0], progress[1]
+	previousStatusID := DeriveStatus(bs.ReadestProgress[0], bs.ReadestProgress[1], bs.ReadestStatus, e.minSyncPercent, e.minSyncPages)
 
 	// Always store Readest progress so it's available when the book gets linked later.
 	bs.ReadestProgress = [2]int{current, total}
@@ -467,17 +541,25 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		bs.LastActivityAt = ts
 	}
 
-	// If not matched yet, save progress and stop — can't push to Hardcover.
-	if bs.HardcoverBookID == 0 {
-		e.state.SetBook(cfg.BookHash, bs)
-		return nil, nil
-	}
-
 	// DeriveStatus; skip if no status update needed.
 	statusID := DeriveStatus(current, total, bs.ReadestStatus, e.minSyncPercent, e.minSyncPages)
+
+	// If not matched yet, save progress and warn once when reading starts.
+	if bs.HardcoverBookID == 0 {
+		shouldNotify := updateUnlinkedReadingNotificationState(&bs, previousStatusID, statusID)
+		e.state.SetBook(cfg.BookHash, bs)
+		if !shouldNotify {
+			return configProcessNotifications{}, nil
+		}
+		return configProcessNotifications{
+			unlinkedReading: &bookUnlinkedReadingNotification{bookHash: bs.BookHash},
+		}, nil
+	}
+	bs.UnlinkedReadingNotificationPending = false
+
 	if statusID == hardcover.StatusNone {
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil, nil
+		return configProcessNotifications{}, nil
 	}
 
 	// ConvertProgress (skip progress update if EditionPages == 0).
@@ -511,7 +593,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 	if statusID == bs.LastStatusSent && hardcoverPages == bs.LastProgressSent && canSkipBeforeReconcile {
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil, nil
+		return configProcessNotifications{}, nil
 	}
 
 	// Ensure UserBookID exists and adopt any existing read record for the linked
@@ -521,7 +603,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 	if needsUserBookLookup {
 		existing, err := updater.GetUserBook(ctx, bs.HardcoverBookID)
 		if err != nil {
-			return nil, fmt.Errorf("get Hardcover user book for book %q: %w", cfg.BookHash, err)
+			return configProcessNotifications{}, fmt.Errorf("get Hardcover user book for book %q: %w", cfg.BookHash, err)
 		}
 
 		if existing != nil {
@@ -551,7 +633,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		if existing == nil && userBookID == 0 {
 			inserted, err := updater.InsertUserBook(ctx, bs.HardcoverBookID, statusID, e.privacySettingID, editionIDPtr)
 			if err != nil {
-				return nil, fmt.Errorf("insert Hardcover user book for book %q: %w", cfg.BookHash, err)
+				return configProcessNotifications{}, fmt.Errorf("insert Hardcover user book for book %q: %w", cfg.BookHash, err)
 			}
 			if inserted.ID > 0 {
 				userBookID = inserted.ID
@@ -573,9 +655,9 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
 		if shouldNotifyComplete() {
-			return &bookCompletedNotification{book: bs}, nil
+			return configProcessNotifications{completed: &bookCompletedNotification{book: bs}}, nil
 		}
-		return nil, nil
+		return configProcessNotifications{}, nil
 	}
 
 	progressMsg := "syncing progress"
@@ -595,7 +677,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		e.emit(SyncEvent{Type: "progress_pending", Title: bs.Title, Detail: fmt.Sprintf("would sync %d%%", pct)})
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil, nil
+		return configProcessNotifications{}, nil
 	}
 
 	// Only allow forward status transitions (want-to-read → reading → read).
@@ -608,14 +690,14 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		)
 		bs.ReadestProgress = [2]int{current, total}
 		e.state.SetBook(cfg.BookHash, bs)
-		return nil, nil
+		return configProcessNotifications{}, nil
 	}
 
 	// Update status and linked edition if changed.
 	if statusID != bs.LastStatusSent || !userBookEditionMatches {
 		statusChanged := statusID != bs.LastStatusSent
 		if _, err := updater.UpdateUserBook(ctx, userBookID, statusID, editionIDPtr); err != nil {
-			return nil, fmt.Errorf("update Hardcover user book for book %q: %w", cfg.BookHash, err)
+			return configProcessNotifications{}, fmt.Errorf("update Hardcover user book for book %q: %w", cfg.BookHash, err)
 		}
 		bs.LastStatusSent = statusID
 		if editionIDPtr != nil {
@@ -639,7 +721,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 			startedAt := time.Now().Format("2006-01-02")
 			read, err := updater.InsertUserBookRead(ctx, userBookID, hardcoverPages, editionIDPtr, startedAt, finishedAt)
 			if err != nil {
-				return nil, fmt.Errorf("insert Hardcover user book read for book %q: %w", cfg.BookHash, err)
+				return configProcessNotifications{}, fmt.Errorf("insert Hardcover user book read for book %q: %w", cfg.BookHash, err)
 			}
 			if read.ID > 0 {
 				bs.UserBookReadID = read.ID
@@ -647,7 +729,7 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 		} else {
 			// Update existing reading session.
 			if _, err := updater.UpdateUserBookRead(ctx, bs.UserBookReadID, hardcoverPages, finishedAt); err != nil {
-				return nil, fmt.Errorf("update Hardcover user book read for book %q: %w", cfg.BookHash, err)
+				return configProcessNotifications{}, fmt.Errorf("update Hardcover user book read for book %q: %w", cfg.BookHash, err)
 			}
 		}
 
@@ -663,9 +745,9 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 	bs.ReadestProgress = [2]int{current, total}
 	e.state.SetBook(cfg.BookHash, bs)
 	if markedComplete {
-		return &bookCompletedNotification{book: bs}, nil
+		return configProcessNotifications{completed: &bookCompletedNotification{book: bs}}, nil
 	}
-	return nil, nil
+	return configProcessNotifications{}, nil
 }
 
 func localLinkageMatchesEdition(bs state.BookState, editionIDPtr *int) bool {
@@ -675,6 +757,33 @@ func localLinkageMatchesEdition(bs state.BookState, editionIDPtr *int) bool {
 	return bs.UserBookID != 0 &&
 		bs.UserBookEditionID == *editionIDPtr &&
 		bs.UserBookReadID != 0
+}
+
+func updateUnlinkedReadingNotificationState(bs *state.BookState, previousStatusID, currentStatusID int) bool {
+	if bs.HardcoverBookID != 0 {
+		bs.UnlinkedReadingNotificationPending = false
+		return false
+	}
+	if !isActiveReadestStatus(currentStatusID) {
+		bs.UnlinkedReadingNotificationPending = false
+		return false
+	}
+	if !isActiveReadestStatus(previousStatusID) {
+		bs.UnlinkedReadingNotificationPending = true
+	}
+	return bs.UnlinkedReadingNotificationPending
+}
+
+func unlinkedReadingNotificationReady(bs state.BookState, minSyncPercent float64, minSyncPages int) bool {
+	if bs.HardcoverBookID != 0 || !bs.UnlinkedReadingNotificationPending {
+		return false
+	}
+	statusID := DeriveStatus(bs.ReadestProgress[0], bs.ReadestProgress[1], bs.ReadestStatus, minSyncPercent, minSyncPages)
+	return isActiveReadestStatus(statusID)
+}
+
+func isActiveReadestStatus(statusID int) bool {
+	return statusID == hardcover.StatusCurrentlyReading || statusID == hardcover.StatusRead
 }
 
 func selectUserBookRead(reads []hardcover.UserBookRead, editionID, currentReadID int) (hardcover.UserBookRead, bool) {
@@ -728,13 +837,15 @@ func (e *Engine) emit(evt SyncEvent) {
 	}
 }
 
-func (e *Engine) notifyBookAdded(ctx context.Context, book state.BookState, autoLinked bool) {
+func (e *Engine) notifyBookAdded(ctx context.Context, book state.BookState, autoLinked bool) bool {
 	if e.notifier == nil {
-		return
+		return false
 	}
 	if err := e.notifier.NotifyBookAdded(ctx, book, autoLinked); err != nil {
 		e.logger.Error("notification failed", "event", "book_added", "title", book.Title, "error", err)
+		return false
 	}
+	return true
 }
 
 func (e *Engine) notifyBookCompleted(ctx context.Context, book state.BookState) {
@@ -743,6 +854,29 @@ func (e *Engine) notifyBookCompleted(ctx context.Context, book state.BookState) 
 	}
 	if err := e.notifier.NotifyBookCompleted(ctx, book); err != nil {
 		e.logger.Error("notification failed", "event", "book_completed", "title", book.Title, "error", err)
+	}
+}
+
+func (e *Engine) notifyBookStartedUnlinked(ctx context.Context, book state.BookState) bool {
+	if e.notifier == nil {
+		return false
+	}
+	if err := e.notifier.NotifyBookStartedUnlinked(ctx, book); err != nil {
+		e.logger.Error("notification failed", "event", "book_started_unlinked", "title", book.Title, "error", err)
+		return false
+	}
+	return true
+}
+
+func (e *Engine) markUnlinkedReadingNotificationSent(bookHash string) {
+	updated := e.state.UpdateBook(bookHash, func(b *state.BookState) {
+		b.UnlinkedReadingNotificationPending = false
+	})
+	if !updated {
+		return
+	}
+	if err := e.state.Save(); err != nil {
+		e.logger.Error("failed to save notification state", "book_hash", bookHash, "error", err)
 	}
 }
 

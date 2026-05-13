@@ -116,6 +116,31 @@ func TestSlack_NotifyBookAdded_NoCoverUsesQuestionEmoji(t *testing.T) {
 	assert.Equal(t, ":question: Action needed: <https://readest.example.com/app/books?book=hash+with+spaces|Unmatched Book>\nCould not link automatically. Open the book and choose a Hardcover match.", text)
 }
 
+func TestSlack_NotifyBookAdded_UnlinkedReadingUsesWarning(t *testing.T) {
+	var payload slackPayload
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	notifier := newTestSlack(t, srv, "https://readest.example.com")
+
+	require.NoError(t, notifier.NotifyBookAdded(context.Background(), state.BookState{
+		BookHash:                           "reading-unmatched",
+		Title:                              "Reading Unmatched",
+		UnlinkedReadingNotificationPending: true,
+	}, false))
+
+	assert.Equal(t, 1, requests)
+	require.Len(t, payload.Blocks, 1)
+	assert.Empty(t, payload.Text)
+	text := requireSlackSectionText(t, payload.Blocks[0])
+	assert.Equal(t, ":warning: Action needed: <https://readest.example.com/books?book=reading-unmatched|Reading Unmatched>\nReadest shows reading activity, but this book is not linked to Hardcover. Open the book and choose a Hardcover match.", text)
+}
+
 func TestSlack_NotifyBookAdded_InvalidCoverUsesQuestionEmoji(t *testing.T) {
 	var payload slackPayload
 	requests := 0
@@ -167,6 +192,30 @@ func TestSlack_NotifyBookCompleted(t *testing.T) {
 	imageURL, altText := requireSlackImageBlock(t, payload.Blocks[1])
 	assert.Equal(t, "https://assets.example.com/done.jpg", imageURL)
 	assert.Equal(t, "Cover for Finished Book", altText)
+}
+
+func TestSlack_NotifyBookStartedUnlinked(t *testing.T) {
+	var payload slackPayload
+	requests := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&payload))
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	notifier := newTestSlack(t, srv, "https://readest.example.com")
+
+	require.NoError(t, notifier.NotifyBookStartedUnlinked(context.Background(), state.BookState{
+		BookHash: "needs-link",
+		Title:    "Needs Link",
+		Author:   "Test Author",
+	}))
+
+	assert.Equal(t, 1, requests)
+	assert.Empty(t, payload.Text)
+	require.Len(t, payload.Blocks, 1)
+	assert.Equal(t, ":warning: Action needed: <https://readest.example.com/books?book=needs-link|Needs Link> by Test Author\nReadest shows reading activity, but this book is not linked to Hardcover. Open the book and choose a Hardcover match.", requireSlackSectionText(t, payload.Blocks[0]))
 }
 
 func TestSlack_NotifyCriticalError(t *testing.T) {

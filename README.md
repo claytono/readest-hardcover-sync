@@ -92,11 +92,12 @@ Once you're confident the matching is correct, you can switch to automatic mode 
 
 ## Notifications
 
-Set `SLACK_WEBHOOK_URL` and `PUBLIC_BASE_URL` to enable Slack notifications. Slack messages link directly back to the book in the web UI and include Hardcover's cover image when one is available. If no cover is available, the message uses the Slack `:question:` emoji.
+Set `SLACK_WEBHOOK_URL` and `PUBLIC_BASE_URL` to enable Slack notifications. Slack messages link directly back to the book in the web UI and include Hardcover's cover image when one is available. If no cover is available, book messages use the Slack `:question:` emoji; unlinked-reading warnings use `:warning:`.
 
 Slack sends notifications when:
 
 - A new Readest book is discovered, including whether it linked automatically
+- An unlinked book starts being read in Readest and needs a Hardcover match
 - A book is marked complete in Hardcover
 - A critical sync error occurs, at most once per day per distinct error per service startup
 

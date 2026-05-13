@@ -134,10 +134,11 @@ type addedBookNotification struct {
 }
 
 type mockNotifier struct {
-	added     []addedBookNotification
-	completed []state.BookState
-	critical  []error
-	err       error
+	added           []addedBookNotification
+	completed       []state.BookState
+	startedUnlinked []state.BookState
+	critical        []error
+	err             error
 }
 
 type syncingObserverNotifier struct {
@@ -155,6 +156,11 @@ func (m *mockNotifier) NotifyBookAdded(_ context.Context, book state.BookState, 
 
 func (m *mockNotifier) NotifyBookCompleted(_ context.Context, book state.BookState) error {
 	m.completed = append(m.completed, book)
+	return m.err
+}
+
+func (m *mockNotifier) NotifyBookStartedUnlinked(_ context.Context, book state.BookState) error {
+	m.startedUnlinked = append(m.startedUnlinked, book)
 	return m.err
 }
 
@@ -176,6 +182,10 @@ func (n *syncingObserverNotifier) NotifyBookCompleted(_ context.Context, _ state
 	n.completedSyncing = n.engine.syncing
 	n.engine.mu.Unlock()
 	n.completedCalled = true
+	return nil
+}
+
+func (n *syncingObserverNotifier) NotifyBookStartedUnlinked(_ context.Context, _ state.BookState) error {
 	return nil
 }
 
@@ -553,6 +563,35 @@ func TestEngine_NewBook_NotifyUnmatched(t *testing.T) {
 	assert.False(t, notifier.added[0].autoLinked)
 	assert.Equal(t, "Unmatched Notify", notifier.added[0].book.Title)
 	assert.True(t, notifier.added[0].book.Unmatched)
+}
+
+func TestEngine_NewUnmatchedReadingSendsSingleActionNotification(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash:      "hashNewUnmatchedReading",
+				Title:         "New Unmatched Reading",
+				ReadingStatus: "reading",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5}}
+	notifier := &mockNotifier{}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.added, 1)
+	assert.False(t, notifier.added[0].autoLinked)
+	assert.Empty(t, notifier.startedUnlinked, "new unmatched reading should not send a duplicate warning")
+	assert.True(t, notifier.added[0].book.UnlinkedReadingNotificationPending)
+	bs, ok := st.GetBook("hashNewUnmatchedReading")
+	require.True(t, ok)
+	assert.False(t, bs.UnlinkedReadingNotificationPending)
 }
 
 func TestEngine_NewBook_NotificationFailureDoesNotFailTick(t *testing.T) {
@@ -1213,6 +1252,116 @@ func TestEngine_ProcessConfig_UnmatchedStoresProgress(t *testing.T) {
 	assert.Empty(t, updater.insertUserBookCalls, "should not write to Hardcover for unmatched books")
 }
 
+func TestEngine_ProcessConfig_UnmatchedReadingNotifiesOnce(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashUnmatchedReading",
+				Progress:  "[25, 500]",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+	st.SetBook("hashUnmatchedReading", state.BookState{
+		BookHash:  "hashUnmatchedReading",
+		Title:     "Unmatched Reading Book",
+		Unmatched: true,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.startedUnlinked, 1)
+	assert.Equal(t, "Unmatched Reading Book", notifier.startedUnlinked[0].Title)
+	assert.Empty(t, updater.insertUserBookCalls, "should not write to Hardcover for unmatched books")
+	bs, ok := st.GetBook("hashUnmatchedReading")
+	require.True(t, ok)
+	assert.False(t, bs.UnlinkedReadingNotificationPending)
+}
+
+func TestEngine_ProcessConfig_UnmatchedFinishedNotifies(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashUnmatchedFinished",
+				Progress:  "[500, 500]",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+	st.SetBook("hashUnmatchedFinished", state.BookState{
+		BookHash:  "hashUnmatchedFinished",
+		Title:     "Unmatched Finished Book",
+		Unmatched: true,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.startedUnlinked, 1)
+	assert.Equal(t, "Unmatched Finished Book", notifier.startedUnlinked[0].Title)
+	bs, ok := st.GetBook("hashUnmatchedFinished")
+	require.True(t, ok)
+	assert.False(t, bs.UnlinkedReadingNotificationPending)
+}
+
+func TestEngine_UnmatchedReadingNotificationRetriesAfterFailure(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{},
+		configs: []readest.DBBookConfig{
+			{
+				BookHash:  "hashUnmatchedRetry",
+				Progress:  "[25, 500]",
+				UpdatedAt: "2024-06-15T10:00:00Z",
+			},
+		},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{err: errors.New("slack unavailable")}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+	st.SetBook("hashUnmatchedRetry", state.BookState{
+		BookHash:  "hashUnmatchedRetry",
+		Title:     "Unmatched Retry Book",
+		Unmatched: true,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+	require.Len(t, notifier.startedUnlinked, 1)
+	bs, ok := st.GetBook("hashUnmatchedRetry")
+	require.True(t, ok)
+	assert.True(t, bs.UnlinkedReadingNotificationPending)
+
+	notifier.err = nil
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, notifier.startedUnlinked, 2)
+	bs, ok = st.GetBook("hashUnmatchedRetry")
+	require.True(t, ok)
+	assert.False(t, bs.UnlinkedReadingNotificationPending)
+}
+
 // TestEngine_WithOptions verifies that NewEngine accepts EngineOptions.
 func TestEngine_WithOptions(t *testing.T) {
 	puller := &mockReadestPuller{books: []readest.DBBook{}, configs: []readest.DBBookConfig{}}
@@ -1545,6 +1694,42 @@ func TestEngine_ProcessBook_UpdatesReadestStatus(t *testing.T) {
 	// processBook only updates state — no Hardcover writes.
 	assert.Empty(t, updater.insertUserBookCalls)
 	assert.Empty(t, updater.updateUserBookCalls)
+}
+
+func TestEngine_ProcessBook_UnmatchedReadingStatusNotifiesOnce(t *testing.T) {
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{
+				BookHash:      "hashUnmatchedStatus",
+				Title:         "Unmatched Status Book",
+				UpdatedAt:     "2024-02-01T00:00:00Z",
+				ReadingStatus: "reading",
+			},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	finder := &mockBookFinder{}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+	notifier := &mockNotifier{}
+
+	engine, st := newTestEngine(t, puller, finder, updater)
+	engine.notifier = notifier
+	st.SetBook("hashUnmatchedStatus", state.BookState{
+		BookHash:  "hashUnmatchedStatus",
+		Title:     "Unmatched Status Book",
+		Unmatched: true,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+	require.NoError(t, engine.Tick(context.Background()))
+
+	bs, ok := st.GetBook("hashUnmatchedStatus")
+	require.True(t, ok)
+	assert.Equal(t, "reading", bs.ReadestStatus)
+	require.Len(t, notifier.startedUnlinked, 1)
+	assert.Equal(t, "Unmatched Status Book", notifier.startedUnlinked[0].Title)
 }
 
 // TestEngine_ParseTimestamp covers the various parseTimestamp branches.
