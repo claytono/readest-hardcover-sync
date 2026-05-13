@@ -16,6 +16,7 @@ type diskState struct {
 
 type State struct {
 	mu             sync.RWMutex
+	saveMu         sync.Mutex
 	path           string
 	lastBookSync   int64
 	lastConfigSync int64
@@ -46,8 +47,9 @@ type BookState struct {
 	LastProgressSent int `json:"last_progress_sent,omitempty"`
 
 	// Last seen Readest data
-	ReadestProgress [2]int `json:"readest_progress,omitempty"`
-	ReadestStatus   string `json:"readest_status,omitempty"`
+	ReadestProgress                    [2]int `json:"readest_progress,omitempty"`
+	ReadestStatus                      string `json:"readest_status,omitempty"`
+	UnlinkedReadingNotificationPending bool   `json:"unlinked_reading_notification_pending,omitempty"`
 
 	// Display metadata
 	Series    string `json:"series,omitempty"`     // e.g., "Dungeon Crawler Carl #7"
@@ -144,6 +146,10 @@ func (s *State) Save() error {
 	if s.path == "" {
 		return nil
 	}
+
+	s.saveMu.Lock()
+	defer s.saveMu.Unlock()
+
 	s.mu.RLock()
 	ds := diskState{
 		LastBookSync:   s.lastBookSync,
@@ -201,6 +207,7 @@ func (s *State) SetManualLink(hash string, bookID int, slug string, editionID, e
 	b.EditionPages = editionPages
 	b.MatchMethod = "manual"
 	b.Unmatched = false
+	b.UnlinkedReadingNotificationPending = false
 	b.Series = ""
 	b.CoverURL = ""
 	b.CoverPath = ""
