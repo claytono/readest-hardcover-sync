@@ -619,12 +619,14 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 			}
 			lastStatusBeforeWrite = bs.LastStatusSent
 			userBookEditionMatches = editionIDPtr == nil || (existing.EditionID != nil && *existing.EditionID == *editionIDPtr)
-			if read, ok := selectUserBookRead(existing.UserBookReads, bs.EditionID, bs.UserBookReadID); ok {
+			// Rebuild read linkage from the authoritative response. Cached IDs and
+			// progress must not select completed, incompatible, or ambiguous rows.
+			bs.UserBookReadID = 0
+			bs.LastProgressSent = 0
+			if read, ok := singleCompatibleUnfinishedRead(existing.UserBookReads, bs.EditionID); ok {
 				bs.UserBookReadID = read.ID
 				if read.ProgressPages != nil {
 					bs.LastProgressSent = *read.ProgressPages
-				} else {
-					bs.LastProgressSent = 0
 				}
 			}
 		} else {
@@ -716,6 +718,23 @@ func (e *Engine) processConfig(ctx context.Context, cfg readest.DBBookConfig, up
 			finishedAt = &today
 		}
 
+		remoteHasReads := false
+		if bs.UserBookReadID == 0 {
+			remoteHasReads, err = reconcileExistingReadBeforeInsert(ctx, updater, &bs)
+			if err != nil {
+				return configProcessNotifications{}, fmt.Errorf("re-check Hardcover reads for book %q: %w", cfg.BookHash, err)
+			}
+		}
+
+		if bs.UserBookReadID == 0 && remoteHasReads {
+			bs.ReadestProgress = [2]int{current, total}
+			e.state.SetBook(cfg.BookHash, bs)
+			if shouldNotifyComplete() {
+				return configProcessNotifications{completed: &bookCompletedNotification{book: bs}}, nil
+			}
+			return configProcessNotifications{}, nil
+		}
+
 		if bs.UserBookReadID == 0 {
 			// Insert new reading session.
 			startedAt := time.Now().Format("2006-01-02")
@@ -786,32 +805,43 @@ func isActiveReadestStatus(statusID int) bool {
 	return statusID == hardcover.StatusCurrentlyReading || statusID == hardcover.StatusRead
 }
 
-func selectUserBookRead(reads []hardcover.UserBookRead, editionID, currentReadID int) (hardcover.UserBookRead, bool) {
-	if editionID != 0 {
-		for _, read := range reads {
-			if read.ID != 0 && read.EditionID != nil && *read.EditionID == editionID {
-				return read, true
-			}
+// reconcileExistingReadBeforeInsert refreshes the remote reading history and
+// adopts its sole compatible unfinished row. The boolean reports whether any
+// remote row exists, so callers can avoid inserting into an incompatible,
+// completed, or ambiguous history.
+func reconcileExistingReadBeforeInsert(ctx context.Context, updater ProgressUpdater, bs *state.BookState) (bool, error) {
+	existing, err := updater.GetUserBook(ctx, bs.HardcoverBookID)
+	if err != nil {
+		return false, err
+	}
+	if existing == nil || len(existing.UserBookReads) == 0 {
+		return false, nil
+	}
+	if read, ok := singleCompatibleUnfinishedRead(existing.UserBookReads, bs.EditionID); ok {
+		bs.UserBookReadID = read.ID
+		if read.ProgressPages != nil {
+			bs.LastProgressSent = *read.ProgressPages
 		}
 	}
-	if currentReadID != 0 {
-		for _, read := range reads {
-			if read.ID == currentReadID {
-				return read, true
-			}
-		}
-	}
+	return true, nil
+}
+
+func singleCompatibleUnfinishedRead(reads []hardcover.UserBookRead, editionID int) (hardcover.UserBookRead, bool) {
+	var found hardcover.UserBookRead
 	for _, read := range reads {
-		if read.ID != 0 && read.EditionID == nil {
-			return read, true
+		if read.ID == 0 || read.FinishedAt != "" {
+			continue
 		}
-	}
-	for _, read := range reads {
-		if read.ID != 0 {
-			return read, true
+		if editionID == 0 && read.EditionID != nil ||
+			editionID != 0 && (read.EditionID == nil || *read.EditionID != editionID) {
+			continue
 		}
+		if found.ID != 0 {
+			return hardcover.UserBookRead{}, false
+		}
+		found = read
 	}
-	return hardcover.UserBookRead{}, false
+	return found, found.ID != 0
 }
 
 // parseTimestamp parses an RFC3339 timestamp string and returns Unix milliseconds.

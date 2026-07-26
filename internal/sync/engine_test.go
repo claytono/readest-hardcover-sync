@@ -108,6 +108,7 @@ type mockProgressUpdater struct {
 	statusesErr error
 
 	userBook         *hardcover.UserBook
+	userBooks        []*hardcover.UserBook
 	getUserErr       error
 	getUserBookCalls []int
 
@@ -213,6 +214,13 @@ func (m *mockProgressUpdater) GetStatuses(_ context.Context) ([]hardcover.BookSt
 
 func (m *mockProgressUpdater) GetUserBook(_ context.Context, bookID int) (*hardcover.UserBook, error) {
 	m.getUserBookCalls = append(m.getUserBookCalls, bookID)
+	if len(m.userBooks) > 0 {
+		index := len(m.getUserBookCalls) - 1
+		if index >= len(m.userBooks) {
+			index = len(m.userBooks) - 1
+		}
+		return m.userBooks[index], m.getUserErr
+	}
 	return m.userBook, m.getUserErr
 }
 
@@ -730,6 +738,112 @@ func TestEngine_ProgressUpdate_NoEditionCachedReadSkipsLookup(t *testing.T) {
 	require.Len(t, updater.updateUserReadCalls, 1)
 	assert.Equal(t, 12, updater.updateUserReadCalls[0].id)
 	assert.Equal(t, 100, updater.updateUserReadCalls[0].progressPages)
+}
+
+func TestEngine_ProgressUpdate_AdoptsRemoteReadMissingFromCache(t *testing.T) {
+	existingProgress := 25
+	puller := &mockReadestPuller{configs: []readest.DBBookConfig{{
+		BookHash: "remote-read", Progress: "[100,400]", UpdatedAt: "2024-01-02T00:00:00Z",
+	}}}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		userBook: &hardcover.UserBook{
+			ID: 55, BookID: 202, StatusID: hardcover.StatusCurrentlyReading,
+			UserBookReads: []hardcover.UserBookRead{{ID: 123, ProgressPages: &existingProgress}},
+		},
+	}
+	engine, st := newTestEngine(t, puller, &mockBookFinder{}, updater)
+	st.SetBook("remote-read", state.BookState{
+		BookHash: "remote-read", HardcoverBookID: 202, EditionPages: 400,
+		UserBookID: 55, LastStatusSent: hardcover.StatusCurrentlyReading, LastProgressSent: 25,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	assert.Empty(t, updater.insertUserReadCalls)
+	require.Len(t, updater.updateUserReadCalls, 1)
+	assert.Equal(t, 123, updater.updateUserReadCalls[0].id)
+}
+
+func TestEngine_Completion_DoesNotDuplicateReadCreatedByStatus(t *testing.T) {
+	progress := 400
+	puller := &mockReadestPuller{configs: []readest.DBBookConfig{{
+		BookHash: "status-created-read", Progress: "[400,400]", UpdatedAt: "2024-01-03T00:00:00Z",
+	}}}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+		userBooks: []*hardcover.UserBook{nil, {
+			ID: 99, BookID: 203, StatusID: hardcover.StatusRead,
+			UserBookReads: []hardcover.UserBookRead{{
+				ID: 124, ProgressPages: &progress, FinishedAt: "2024-01-03",
+			}},
+		}},
+	}
+	notifier := &mockNotifier{}
+	engine, st := newTestEngine(t, puller, &mockBookFinder{}, updater)
+	engine.notifier = notifier
+	st.SetBook("status-created-read", state.BookState{
+		BookHash: "status-created-read", Title: "Status Created Read",
+		HardcoverBookID: 203, EditionPages: 400,
+	})
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	require.Len(t, updater.insertUserBookCalls, 1)
+	assert.Equal(t, hardcover.StatusRead, updater.insertUserBookCalls[0].statusID)
+	assert.Empty(t, updater.insertUserReadCalls)
+	assert.Empty(t, updater.updateUserReadCalls)
+	require.Len(t, notifier.completed, 1)
+}
+
+func TestEngine_ProgressUpdate_ExistingReadAlwaysBlocksInsertAfterCacheLoss(t *testing.T) {
+	otherEditionID := 80
+	progress := 25
+	for _, tc := range []struct {
+		name  string
+		reads []hardcover.UserBookRead
+	}{
+		{
+			name: "completed",
+			reads: []hardcover.UserBookRead{{
+				ID: 125, ProgressPages: &progress, FinishedAt: "2024-01-01",
+			}},
+		},
+		{
+			name: "edition specific",
+			reads: []hardcover.UserBookRead{{
+				ID: 126, EditionID: &otherEditionID, ProgressPages: &progress,
+			}},
+		},
+		{
+			name: "ambiguous",
+			reads: []hardcover.UserBookRead{
+				{ID: 127, ProgressPages: &progress},
+				{ID: 128, ProgressPages: &progress},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			puller := &mockReadestPuller{configs: []readest.DBBookConfig{{
+				BookHash: "blocked-insert", Progress: "[100,400]", UpdatedAt: "2024-01-02T00:00:00Z",
+			}}}
+			updater := &mockProgressUpdater{
+				meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+				userBook: &hardcover.UserBook{
+					ID: 55, BookID: 204, StatusID: hardcover.StatusCurrentlyReading, UserBookReads: tc.reads,
+				},
+			}
+			engine, st := newTestEngine(t, puller, &mockBookFinder{}, updater)
+			st.SetBook("blocked-insert", state.BookState{
+				BookHash: "blocked-insert", HardcoverBookID: 204, EditionPages: 400,
+			})
+
+			require.NoError(t, engine.Tick(context.Background()))
+
+			assert.Empty(t, updater.insertUserReadCalls)
+			assert.Empty(t, updater.updateUserReadCalls)
+		})
+	}
 }
 
 // TestEngine_Finished: Config progress [700,700] or status "finished".
@@ -2606,75 +2720,6 @@ func TestEngine_ProcessConfig_ReplacesStaleReadWithLinkedEditionRead(t *testing.
 	require.True(t, ok)
 	assert.Equal(t, 5311405, bs.UserBookReadID)
 	assert.Equal(t, 80, bs.LastProgressSent)
-}
-
-func TestSelectUserBookRead(t *testing.T) {
-	editionID := 80
-	otherEditionID := 81
-	progressPages := 10
-
-	tests := []struct {
-		name          string
-		reads         []hardcover.UserBookRead
-		editionID     int
-		currentReadID int
-		wantID        int
-		wantOK        bool
-	}{
-		{
-			name:      "matching edition wins",
-			editionID: editionID,
-			reads: []hardcover.UserBookRead{
-				{ID: 1},
-				{ID: 2, EditionID: &editionID},
-			},
-			wantID: 2,
-			wantOK: true,
-		},
-		{
-			name:          "current read used when no edition match",
-			editionID:     editionID,
-			currentReadID: 3,
-			reads: []hardcover.UserBookRead{
-				{ID: 3, EditionID: &otherEditionID},
-				{ID: 4},
-			},
-			wantID: 3,
-			wantOK: true,
-		},
-		{
-			name:      "editionless read fallback",
-			editionID: editionID,
-			reads: []hardcover.UserBookRead{
-				{ID: 5, EditionID: &otherEditionID},
-				{ID: 6, ProgressPages: &progressPages},
-			},
-			wantID: 6,
-			wantOK: true,
-		},
-		{
-			name:      "any read fallback",
-			editionID: editionID,
-			reads: []hardcover.UserBookRead{
-				{ID: 7, EditionID: &otherEditionID},
-			},
-			wantID: 7,
-			wantOK: true,
-		},
-		{
-			name:   "no valid read",
-			reads:  []hardcover.UserBookRead{{ID: 0}},
-			wantOK: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := selectUserBookRead(tt.reads, tt.editionID, tt.currentReadID)
-			assert.Equal(t, tt.wantOK, ok)
-			assert.Equal(t, tt.wantID, got.ID)
-		})
-	}
 }
 
 // TestEngine_ProcessConfig_GetUserBook_Error: GetUserBook returns error — processConfig
