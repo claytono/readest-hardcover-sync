@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/chromedp/chromedp v0.15.0
 	github.com/stretchr/testify v1.11.1
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 )
 
 require (
