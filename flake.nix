@@ -21,7 +21,7 @@
           owner = "vladopajic";
           repo = "go-test-coverage";
           rev = "v${version}";
-          hash = "sha256-8KPnufCLGR3beBjTJSGSkxZd+m3r1pYDtTBLhG/eSEg=";
+          hash = "sha256-Z/9BGs2Y8SNJPfiQ/eUAjgmz7UCAaX8DEKgLVqkzExw=";
         };
 
         vendorHash = "sha256-iJ3VFnzPYd0ovyK/QdCDolh5p8fe/aXulnHxAia5UuE=";
