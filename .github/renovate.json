@@ -1,15 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", "helpers:pinGitHubActionDigestsToSemver"],
-  "rebaseWhen": "behind-base-branch",
-  "schedule": ["after 2am and before 8am on monday"],
-  "timezone": "America/New_York",
-  "minimumReleaseAge": "14 days",
-  "prHourlyLimit": 0,
-  "prConcurrentLimit": 0,
-  "pre-commit": {
-    "enabled": true
-  },
+  "extends": ["github>claytono/renovate-config"],
   "customManagers": [
     {
       "customType": "regex",
@@ -31,13 +22,7 @@
       "datasourceTemplate": "github-releases"
     }
   ],
-  "gitIgnoredAuthors": ["github-actions[bot]@users.noreply.github.com"],
   "packageRules": [
-    {
-      "description": "Automerge pre-commit hook updates",
-      "matchManagers": ["pre-commit"],
-      "automerge": true
-    },
     {
       "description": "Automerge Go patch and digest updates",
       "matchDatasources": ["go"],
@@ -46,7 +31,7 @@
     },
     {
       "description": "Automerge Docker digest updates",
-      "matchDatasources": ["docker"],
+      "matchDatasources": ["docker", "custom.docker-first-seen"],
       "matchUpdateTypes": ["digest"],
       "automerge": true
     },
