@@ -3,13 +3,13 @@ module github.com/claytono/readest-hardcover-sync
 go 1.26.0
 
 require (
-	github.com/chromedp/chromedp v0.15.0
+	github.com/chromedp/chromedp v0.21.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/time v0.15.0
 )
 
 require (
-	github.com/chromedp/cdproto v0.0.0-20260320225252-cf654f46fc63 // indirect
+	github.com/chromedp/cdproto v0.159.0 // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/go-json-experiment/json v0.0.0-20260214004413-d219187c3433 // indirect
