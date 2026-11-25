@@ -225,18 +225,17 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		return err
 	}
 
-	var maxBookUpdatedAt int64
+	var maxBookCursor int64
 	var newBooks, updatedBooks int
 	var pendingBookNotifications []bookAddedNotification
 	var pendingCompletionNotifications []bookCompletedNotification
 	var pendingUnlinkedReadingNotifications []bookUnlinkedReadingNotification
 	for _, book := range books {
+		if ts := bookCursor(book); ts > maxBookCursor {
+			maxBookCursor = ts
+		}
 		if book.DeletedAt != nil {
 			continue
-		}
-		ts := parseTimestamp(book.UpdatedAt)
-		if ts > maxBookUpdatedAt {
-			maxBookUpdatedAt = ts
 		}
 		_, exists := e.state.GetBook(book.BookHash)
 		notifications, err := e.processBook(ctx, book)
@@ -264,14 +263,13 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		return err
 	}
 
-	var maxConfigUpdatedAt int64
+	var maxConfigCursor int64
 	for _, cfg := range configs {
+		if ts := configCursor(cfg); ts > maxConfigCursor {
+			maxConfigCursor = ts
+		}
 		if cfg.DeletedAt != nil {
 			continue
-		}
-		ts := parseTimestamp(cfg.UpdatedAt)
-		if ts > maxConfigUpdatedAt {
-			maxConfigUpdatedAt = ts
 		}
 		notifications, err := e.processConfig(ctx, cfg, updater)
 		if err != nil {
@@ -375,12 +373,13 @@ func (e *Engine) tick(ctx context.Context, updater ProgressUpdater) error {
 		}
 	}
 
-	// Step 7: Update state timestamps from max updated_at of returned records.
-	if maxBookUpdatedAt > e.state.GetLastBookSync() {
-		e.state.SetLastBookSync(maxBookUpdatedAt)
+	// Step 7: Advance the cursors past every returned record, deleted ones
+	// included, so the next pull does not return them again.
+	if maxBookCursor > e.state.GetLastBookSync() {
+		e.state.SetLastBookSync(maxBookCursor)
 	}
-	if maxConfigUpdatedAt > e.state.GetLastConfigSync() {
-		e.state.SetLastConfigSync(maxConfigUpdatedAt)
+	if maxConfigCursor > e.state.GetLastConfigSync() {
+		e.state.SetLastConfigSync(maxConfigCursor)
 	}
 
 	// Step 8: Save state.
@@ -847,18 +846,65 @@ func singleCompatibleUnfinishedRead(reads []hardcover.UserBookRead, editionID in
 // parseTimestamp parses an RFC3339 timestamp string and returns Unix milliseconds.
 // Returns 0 on error or empty string.
 func parseTimestamp(s string) int64 {
-	if s == "" {
+	t, ok := parseTime(s)
+	if !ok {
 		return 0
+	}
+	return t.UnixMilli()
+}
+
+// bookCursor returns the cursor to save after a pulled book. Readest returns
+// books whose synced_at, which its database stamps on every write including
+// deletes, is after the cursor; updated_at can stay older than that. Fall back
+// to updated_at for a server that does not send synced_at.
+func bookCursor(b readest.DBBook) int64 {
+	if b.SyncedAt != "" {
+		return syncCursor(b.SyncedAt)
+	}
+	return syncCursor(b.UpdatedAt)
+}
+
+// configCursor returns the cursor to save after a pulled config. Readest
+// returns configs updated or deleted after the cursor.
+func configCursor(c readest.DBBookConfig) int64 {
+	ts := syncCursor(c.UpdatedAt)
+	if c.DeletedAt != nil {
+		ts = max(ts, syncCursor(*c.DeletedAt))
+	}
+	return ts
+}
+
+// syncCursor returns the Unix millisecond cursor to save after a record with
+// this timestamp. Readest stores timestamps with microseconds and returns
+// records later than the millisecond cursor, so a truncated cursor would
+// return the newest record again on every tick. Rounding up past any
+// sub-millisecond part makes that record count as seen.
+func syncCursor(s string) int64 {
+	t, ok := parseTime(s)
+	if !ok {
+		return 0
+	}
+	ms := t.UnixMilli()
+	if t.Nanosecond()%int(time.Millisecond) != 0 {
+		ms++
+	}
+	return ms
+}
+
+// parseTime parses an RFC3339 timestamp, or one without a time zone.
+func parseTime(s string) (time.Time, bool) {
+	if s == "" {
+		return time.Time{}, false
 	}
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
 		// Try without timezone.
 		t, err = time.Parse("2006-01-02T15:04:05", s)
 		if err != nil {
-			return 0
+			return time.Time{}, false
 		}
 	}
-	return t.UnixMilli()
+	return t, true
 }
 
 func (e *Engine) emit(evt SyncEvent) {

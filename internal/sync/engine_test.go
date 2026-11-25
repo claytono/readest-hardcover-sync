@@ -1882,6 +1882,28 @@ func TestEngine_ParseTimestamp(t *testing.T) {
 	}
 }
 
+// TestEngine_SyncCursor covers rounding the cursor up past sub-millisecond
+// time, which Readest stores and compares against.
+func TestEngine_SyncCursor(t *testing.T) {
+	whole := parseTimestamp("2024-06-15T10:00:00.123Z")
+	tests := []struct {
+		name  string
+		input string
+		want  int64
+	}{
+		{name: "empty string returns 0", input: "", want: 0},
+		{name: "unparseable string returns 0", input: "not-a-timestamp", want: 0},
+		{name: "whole millisecond is kept", input: "2024-06-15T10:00:00.123Z", want: whole},
+		{name: "sub-millisecond rounds up", input: "2024-06-15T10:00:00.123456Z", want: whole + 1},
+		{name: "offset with microseconds rounds up", input: "2024-06-15T10:00:00.123001+00:00", want: whole + 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, syncCursor(tt.input))
+		})
+	}
+}
+
 // TestEngine_StatusName covers known and unknown status IDs.
 func TestEngine_StatusName(t *testing.T) {
 	engine := &Engine{
@@ -2901,6 +2923,86 @@ func TestEngine_TimestampFromRecords(t *testing.T) {
 	// Should NOT be zero and should NOT be wall clock (much larger value).
 	assert.Greater(t, st.GetLastBookSync(), int64(0))
 	assert.Less(t, st.GetLastBookSync(), int64(2000000000000)) // not a wall clock time from ~2033+
+}
+
+// TestEngine_TimestampFromRecords_SubMillisecond: Readest compares updated_at
+// with microseconds against the millisecond cursor, so both cursors must land
+// after the newest record, or it comes back on every tick.
+func TestEngine_TimestampFromRecords_SubMillisecond(t *testing.T) {
+	bookTS := "2024-06-15T12:30:00.532456Z"
+	configTS := "2024-06-15T12:31:00.000789Z"
+
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{BookHash: "hashSub", Title: "Book Sub", UpdatedAt: bookTS},
+		},
+		configs: []readest.DBBookConfig{
+			{BookHash: "hashSub", UpdatedAt: configTS},
+		},
+	}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, &mockBookFinder{}, updater)
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	assert.Equal(t, parseTimestamp(bookTS)+1, st.GetLastBookSync())
+	assert.Equal(t, parseTimestamp(configTS)+1, st.GetLastConfigSync())
+}
+
+// TestEngine_TimestampFromRecords_SyncedAt: Readest selects books by synced_at,
+// which can be later than updated_at, so the book cursor must follow synced_at
+// or the book comes back on every tick.
+func TestEngine_TimestampFromRecords_SyncedAt(t *testing.T) {
+	syncedAt := "2024-06-20T08:00:00.250001Z"
+
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{BookHash: "hashSynced", Title: "Book Synced", UpdatedAt: "2024-06-15T12:30:00.532456Z", SyncedAt: syncedAt},
+		},
+		configs: []readest.DBBookConfig{},
+	}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, &mockBookFinder{}, updater)
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	assert.Equal(t, parseTimestamp(syncedAt)+1, st.GetLastBookSync())
+}
+
+// TestEngine_TimestampFromRecords_Deleted: Readest returns deleted records too,
+// so they must advance the cursors even though they are otherwise skipped.
+func TestEngine_TimestampFromRecords_Deleted(t *testing.T) {
+	bookDeletedAt := "2024-06-20T08:00:00Z"
+	configDeletedAt := "2024-06-21T09:00:00Z"
+
+	puller := &mockReadestPuller{
+		books: []readest.DBBook{
+			{BookHash: "hashLive", Title: "Live Book", UpdatedAt: "2024-06-15T10:00:00Z", SyncedAt: "2024-06-15T10:00:00Z"},
+			{BookHash: "hashGone", Title: "Gone Book", UpdatedAt: "2024-06-01T10:00:00Z", SyncedAt: bookDeletedAt, DeletedAt: &bookDeletedAt},
+		},
+		configs: []readest.DBBookConfig{
+			{BookHash: "hashLive", UpdatedAt: "2024-06-15T10:00:00Z"},
+			{BookHash: "hashGone", UpdatedAt: "2024-06-01T10:00:00Z", DeletedAt: &configDeletedAt},
+		},
+	}
+	updater := &mockProgressUpdater{
+		meResponse: &hardcover.MeResponse{ID: 1, AccountPrivacySettingID: 5},
+	}
+
+	engine, st := newTestEngine(t, puller, &mockBookFinder{}, updater)
+
+	require.NoError(t, engine.Tick(context.Background()))
+
+	assert.Equal(t, parseTimestamp(bookDeletedAt), st.GetLastBookSync())
+	assert.Equal(t, parseTimestamp(configDeletedAt), st.GetLastConfigSync())
+	_, ok := st.GetBook("hashGone")
+	assert.False(t, ok, "deleted book should not be added to state")
 }
 
 // TestEngine_BlockedTransition_DNF: Book marked as DNF on Hardcover should not
