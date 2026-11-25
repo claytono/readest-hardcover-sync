@@ -20,6 +20,7 @@ type DBBook struct {
 	ReadingStatus string  `json:"reading_status,omitempty"`
 	Metadata      *string `json:"metadata,omitempty"`
 	UpdatedAt     string  `json:"updated_at,omitempty"`
+	SyncedAt      string  `json:"synced_at,omitempty"`
 	DeletedAt     *string `json:"deleted_at,omitempty"`
 }
 
