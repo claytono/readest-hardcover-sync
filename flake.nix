@@ -32,6 +32,15 @@
 
         vendorHash = "sha256-iJ3VFnzPYd0ovyK/QdCDolh5p8fe/aXulnHxAia5UuE=";
 
+        # The vendored modules' store path depends only on their name and
+        # vendorHash, so after a version bump a cached copy built from the old
+        # source can satisfy a stale vendorHash and hide the mismatch. Naming
+        # them after the source hash gives every new source a path that has
+        # never been built, so a stale vendorHash fails and gets fixed.
+        overrideModAttrs = _: prev: {
+          name = "${prev.name}-${builtins.substring 0 8 (builtins.hashString "sha256" src.outputHash)}";
+        };
+
         passthru.refreshSourceHash = true;
 
         # Skip tests - upstream has integration tests requiring GitHub credentials
