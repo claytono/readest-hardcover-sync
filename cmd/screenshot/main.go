@@ -40,14 +40,16 @@ func run() error {
 	// Desktop screenshot (1440x900 at 2x for retina quality).
 	// CaptureScreenshot captures only the viewport, not the full scrollable page.
 	logger.Info("capturing desktop screenshot")
-	var desktopBuf []byte
-	if err := chromedp.Run(taskCtx,
+	if err := chromedp.Do(taskCtx,
 		chromedp.EmulateViewport(1440, 900, chromedp.EmulateScale(2)),
 		chromedp.Navigate(baseURL+"/books"),
 		chromedp.WaitReady("body"),
 		chromedp.Sleep(2*time.Second),
-		chromedp.CaptureScreenshot(&desktopBuf),
 	); err != nil {
+		return err
+	}
+	desktopBuf, err := chromedp.Run(taskCtx, chromedp.CaptureScreenshot())
+	if err != nil {
 		return err
 	}
 	if err := os.WriteFile("screenshots/desktop.png", desktopBuf, 0o644); err != nil {
@@ -57,14 +59,16 @@ func run() error {
 
 	// Mobile screenshot (375x812 at 2x for retina quality).
 	logger.Info("capturing mobile screenshot")
-	var mobileBuf []byte
-	if err := chromedp.Run(taskCtx,
+	if err := chromedp.Do(taskCtx,
 		chromedp.EmulateViewport(375, 812, chromedp.EmulateScale(2)),
 		chromedp.Navigate(baseURL+"/books"),
 		chromedp.WaitReady("body"),
 		chromedp.Sleep(2*time.Second),
-		chromedp.CaptureScreenshot(&mobileBuf),
 	); err != nil {
+		return err
+	}
+	mobileBuf, err := chromedp.Run(taskCtx, chromedp.CaptureScreenshot())
+	if err != nil {
 		return err
 	}
 	if err := os.WriteFile("screenshots/mobile.png", mobileBuf, 0o644); err != nil {
