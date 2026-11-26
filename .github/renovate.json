@@ -9,8 +9,20 @@
       "currentValueTemplate": "{{{major}}}.{{{minor}}}",
       "depNameTemplate": "golang",
       "datasourceTemplate": "golang-version",
-      "versioningTemplate": "go-mod-directive",
+      "versioningTemplate": "semver-coerced",
+      "extractVersionTemplate": "^(?<version>\\d+\\.\\d+)",
       "autoReplaceStringTemplate": "go_{{{newMajor}}}_{{{newMinor}}}"
+    },
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/^go\\.mod$/"],
+      "matchStrings": ["\\ngo (?<major>\\d+)\\.(?<minor>\\d+)\\.\\d+\\n"],
+      "currentValueTemplate": "{{{major}}}.{{{minor}}}",
+      "depNameTemplate": "golang",
+      "datasourceTemplate": "golang-version",
+      "versioningTemplate": "semver-coerced",
+      "extractVersionTemplate": "^(?<version>\\d+\\.\\d+)",
+      "autoReplaceStringTemplate": "\ngo {{{newMajor}}}.{{{newMinor}}}.0\n"
     },
     {
       "customType": "regex",
@@ -36,10 +48,16 @@
       "automerge": true
     },
     {
-      "description": "Bump Go version in flake.nix on new minor releases",
-      "matchDatasources": ["golang-version"],
+      "description": "The go.mod go directive is bumped by the golang regex manager alongside flake.nix",
+      "matchManagers": ["gomod"],
+      "matchDepTypes": ["golang"],
+      "enabled": false
+    },
+    {
+      "description": "Move Go in flake.nix, go.mod and the Dockerfile's golang image in one PR. The image sets GOTOOLCHAIN=local, so the Docker build fails if go.mod moves ahead of it.",
       "matchDepNames": ["golang"],
-      "rangeStrategy": "bump"
+      "matchUpdateTypes": ["major", "minor"],
+      "groupName": "Go"
     }
   ]
 }
