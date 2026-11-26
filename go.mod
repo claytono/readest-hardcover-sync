@@ -1,6 +1,6 @@
 module github.com/claytono/readest-hardcover-sync
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/chromedp/chromedp v0.15.0
