@@ -27,10 +27,10 @@
           repo = "go-test-coverage";
           rev = "v${version}";
           name = "go-test-coverage-${version}-source";
-          hash = "sha256-8KPnufCLGR3beBjTJSGSkxZd+m3r1pYDtTBLhG/eSEg=";
+          hash = "sha256-UCsgO041+1kFq2dkplYtzd2ml9BuAZR44UAbEIaBSQQ=";
         };
 
-        vendorHash = "sha256-iJ3VFnzPYd0ovyK/QdCDolh5p8fe/aXulnHxAia5UuE=";
+        vendorHash = "sha256-bhRprQCWk69p+PknwsKRHTAKnKoLO7nnaWLfmFu/0ZA=";
 
         # The vendored modules' store path depends only on their name and
         # vendorHash, so after a version bump a cached copy built from the old
